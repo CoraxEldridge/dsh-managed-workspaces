@@ -18,13 +18,23 @@
 
 ## 安装
 
-在 DSH 中让代理使用 `plugin_manager` 的 `install_bundle`，目标为本包的绝对路径：
+从 GitHub 安装（推荐）：在 DSH 中让代理使用 `plugin_manager` 的 `install_bundle`：
+
+```
+plugin_manager({ action: "install_bundle", target: "https://github.com/CoraxEldridge/dsh-managed-workspaces" })
+```
+
+也可以先把仓库克隆到本地，再用本地目录安装：
 
 ```
 plugin_manager({ action: "install_bundle", target: "D:\\path\\to\\dsh-managed-workspaces" })
 ```
 
-安装后侧边栏底部出现「托管工作区」入口；若结果显示 `restart-required`，重启 DSH 后生效。
+安装后侧边栏底部出现「托管工作区」入口；若结果显示 `restart-required`，重启 DSH 后生效。更新已安装版本：
+
+```
+plugin_manager({ action: "install_bundle", target: "https://github.com/CoraxEldridge/dsh-managed-workspaces" })
+```
 
 ## 接入已有工作区
 
