@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Managed workspaces">
+  <defs>
+    <linearGradient id="mwsFolder" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4c8dff"/>
+      <stop offset="1" stop-color="#2563d9"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#eef3ff"/>
+  <path d="M12 22a4 4 0 0 1 4-4h11l4 4h13a4 4 0 0 1 4 4v18a4 4 0 0 1-4 4H16a4 4 0 0 1-4-4z" fill="url(#mwsFolder)"/>
+  <path d="M12 28h40v14a4 4 0 0 1-4 4H16a4 4 0 0 1-4-4z" fill="#6ea2ff" opacity="0.55"/>
+  <circle cx="46" cy="42" r="11" fill="#1f4fb8"/>
+  <path d="M46 36.5v11M40.5 42h11" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M18 49h19" stroke="#fff" stroke-width="3" stroke-linecap="round" opacity="0.85"/>
+</svg>

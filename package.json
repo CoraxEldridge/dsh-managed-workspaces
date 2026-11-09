@@ -1,0 +1,53 @@
+{
+  "name": "dsh-managed-workspaces",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "DSH-owned workspaces created under a configurable base directory, with multiple linked folders per workspace.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "workspace",
+    "multi-root"
+  ],
+  "license": "MIT",
+  "author": "CoraxEldridge",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CoraxEldridge/dsh-managed-workspaces.git"
+  },
+  "homepage": "https://github.com/CoraxEldridge/dsh-managed-workspaces#readme",
+  "bugs": {
+    "url": "https://github.com/CoraxEldridge/dsh-managed-workspaces/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "store.js",
+    "routes.js",
+    "tool.js",
+    "context.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

@@ -1,0 +1,10 @@
+# dsh-managed-workspaces bundle patch.
+#
+# One plugin row: the host half (exports ".") owns the workspace manifest, the
+# junction links, the `/dsh-managed-workspaces/api/*` routes, the
+# `managed_workspace` tool, and the prompt context; the `dsh.client`
+# declaration in package.json makes the browser half (exports "./client") load
+# in the Web GUI.
+- insert:
+    - id: dsh-managed-workspaces
+      name: 'dsh-managed-workspaces'

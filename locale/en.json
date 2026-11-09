@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Managed workspaces",
+    "description": "Creates workspace folders under a base directory and links several folders into one workspace."
+  }
+}
