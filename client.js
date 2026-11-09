@@ -156,10 +156,6 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = `
-.dsh-mws-foot{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px;padding:0 8px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:var(--dsw-font-xs-13);cursor:pointer;}
-.dsh-mws-foot:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);}
-.dsh-mws-foot:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color);outline-offset:2px;}
-.dsh-mws-foot-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .dsh-mws-backdrop{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(10,14,26,.42);}
 .dsh-mws-dialog{display:flex;flex-direction:column;width:min(760px,100%);max-height:min(84vh,820px);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-xl);box-shadow:var(--dsw-elevation-panel);font-family:var(--dsw-font-family);overflow:hidden;outline:none;}
 .dsh-mws-head{display:flex;align-items:flex-start;gap:12px;padding:16px 18px;border-bottom:1px solid var(--dsw-alias-border-l2);}
@@ -405,49 +401,6 @@ window.__ModuleLoader__.load({
           'dsh-managed-workspaces: workspace context menu',
         )
       })
-
-      function icon() {
-        return h(
-          'svg',
-          { width: 15, height: 15, viewBox: '0 0 16 16', 'aria-hidden': true, focusable: 'false' },
-          h('path', {
-            d: 'M2 4.5A1.5 1.5 0 0 1 3.5 3h2.4l1.2 1.4h4.4A1.5 1.5 0 0 1 13 5.9v5.6A1.5 1.5 0 0 1 11.5 13h-8A1.5 1.5 0 0 1 2 11.5z',
-            fill: 'none',
-            stroke: 'currentColor',
-            'stroke-width': '1.2',
-            'stroke-linejoin': 'round',
-          }),
-          h('path', {
-            d: 'M8 7.2v3.6M6.2 9h3.6',
-            stroke: 'currentColor',
-            'stroke-width': '1.2',
-            'stroke-linecap': 'round',
-          }),
-        )
-      }
-
-      function FooterButton(props) {
-        const t = props.t ?? translate
-        const state = React.useSyncExternalStore(subscribe, getSnapshot)
-        const wide = props.wide === true
-        const open = () => {
-          openPanel(null, null)
-        }
-        return h(
-          'button',
-          {
-            type: 'button',
-            className: wide ? 'dsh-mws-foot dsh-mws-foot-wide' : 'dsh-mws-foot',
-            title: t('title'),
-            'aria-label': t('title'),
-            'aria-haspopup': 'dialog',
-            'aria-expanded': state.open ? 'true' : 'false',
-            onClick: open,
-          },
-          icon(),
-          wide ? h('span', { className: 'dsh-mws-foot-label' }, t('title')) : null,
-        )
-      }
 
       function Overlay(props) {
         const t = props.t ?? translate
@@ -1145,19 +1098,6 @@ window.__ModuleLoader__.load({
           ),
         )
       }
-
-      ctx.slots.inject('sidebar.footer.action', () =>
-        ctx.slots.register(
-          {
-            name: 'sidebar.footer.action',
-            id: 'dsh-managed-workspaces',
-            order: 40,
-            label: translate('title'),
-            locale: NS,
-          },
-          FooterButton,
-        ),
-      )
 
       ctx.slots.inject('shell.overlay', () =>
         ctx.slots.register(
