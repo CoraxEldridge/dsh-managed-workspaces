@@ -102,6 +102,7 @@ plugin_manager({ action: "install_bundle", target: "D:\\path\\to\\dsh-managed-wo
 - **搜索不会自动穿越链接**：`glob`/`grep` 通过 ripgrep 执行且不带 `--follow`，所以从工作区根搜索一般不会进入 `_roots/<别名>`。请对每个关联文件夹显式指定路径，例如 `grep({ path: "_roots/web" })`。插件会在提示上下文中提醒模型。
 - **`workspace-write` 下无法写关联文件夹**：链接目标是工作区根之外的路径，文件沙箱会拒绝写入（Windows 上又无法用 `additionalWritableRoots` 表达，因为会让 pwsh 的 ACL 沙箱直接失败）。需要修改关联文件夹时把会话切到 `danger-full-access`。
 - **不支持 UNC 路径**：Windows junction 不能指向网络共享（会明确报错）。
+- **会话不能跨工作区拖动或移动**：工作区归属由会话头中不可变的 `cwd` 推导（`attachSession` 要求它等于工作区路径），DSH 没有修改该记录的接口。侧边栏的拖拽只在同一工作区内排序；要整理对话位置，请用本插件的「迁移工作区」移动目录。
 - 工作区文件夹被外部删除时不会静默重建，需在界面点「修复」。
 - 若 `_roots/<别名>` 被真实文件或目录占用，插件只报告冲突，绝不覆盖或删除。
 - 卸载插件不会动磁盘上的任何工作区文件夹、链接或会话。
