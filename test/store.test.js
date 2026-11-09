@@ -41,6 +41,7 @@ function fakeRegistry(rows = []) {
     id: row.id ?? `w-${index}`,
     path: row.path,
     title: row.title ?? 'workspace',
+    sessionIds: Array.isArray(row.sessionIds) ? [...row.sessionIds] : [],
   }))
   return {
     rows: list,
@@ -48,7 +49,7 @@ function fakeRegistry(rows = []) {
     async create(path, title) {
       const found = list.find((row) => row.path.toLowerCase() === path.toLowerCase())
       if (found !== undefined) return found
-      const row = { id: `w-${list.length}`, path, title: title ?? 'workspace' }
+      const row = { id: `w-${list.length}`, path, title: title ?? 'workspace', sessionIds: [] }
       list.push(row)
       return row
     },
@@ -353,4 +354,126 @@ test('repair refuses to recreate a missing adopted workspace folder', async (t) 
 
   await expectCode(store.repair(adopted.workspace.id), 'missing')
   await assert.rejects(lstat(existing), /ENOENT/)
+})
+
+test('migrate moves a session-less workspace and re-registers it at the new path', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  const oldPath = created.workspace.path
+  const target = join(root, 'elsewhere', 'demo')
+
+  const result = await store.migrate(created.workspace.id, target)
+  assert.equal(result.mode, 'clean')
+  assert.equal(result.movedBy, 'rename')
+  assert.equal(result.workspace.path, await realpath(target))
+  assert.equal(result.workspace.relocatedTo, null)
+  assert.equal(result.workspace.registered, true)
+  await assert.rejects(lstat(oldPath), /ENOENT/)
+  assert.deepEqual(await readdir(result.workspace.path), ['_roots'])
+  assert.equal(registry.rows.length, 1)
+  assert.equal(registry.rows[0].path.toLowerCase(), (await realpath(target)).toLowerCase())
+})
+
+test('migrate keeps an anchor link when the workspace has sessions', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  const oldPath = created.workspace.path
+  registry.rows[0].sessionIds = ['session-a', 'session-b']
+  const target = join(root, 'elsewhere', 'demo')
+
+  const result = await store.migrate(created.workspace.id, target)
+  assert.equal(result.mode, 'anchor')
+  assert.equal(result.sessionCount, 2)
+  assert.equal(result.workspace.path, oldPath)
+  assert.equal(result.workspace.relocatedTo, await realpath(target))
+  assert.equal(result.workspace.registered, true)
+  assert.equal(result.workspace.sessionCount, 2)
+
+  const anchor = await lstat(oldPath)
+  assert.equal(anchor.isSymbolicLink(), true)
+  assert.equal((await realpath(oldPath)).toLowerCase(), (await realpath(target)).toLowerCase())
+  assert.equal((await readdir(target)).includes('_roots'), true)
+
+  // The registration itself is untouched, so the recorded sessions stay grouped.
+  assert.equal(registry.rows.length, 1)
+  assert.equal(registry.rows[0].id, 'w-0')
+  assert.equal(registry.rows[0].path, oldPath)
+
+  assert.equal(store.findWorkspaceForPath(join(oldPath, 'src', 'a.js')).via, 'home')
+  assert.equal(store.findWorkspaceForPath(join(target, 'src', 'a.js')).via, 'relocated')
+})
+
+test('migrate refuses a clean move while sessions are recorded', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  registry.rows[0].sessionIds = ['session-a']
+
+  await expectCode(
+    store.migrate(created.workspace.id, join(root, 'elsewhere'), { mode: 'clean' }),
+    'sessions-present',
+  )
+  assert.ok((await lstat(created.workspace.path)).isDirectory())
+})
+
+test('migrate validates the destination', async (t) => {
+  const { root, store } = await makeStore(t)
+  const created = await store.create('demo')
+  const existing = join(root, 'existing')
+  await mkdir(existing)
+
+  await expectCode(store.migrate(created.workspace.id, existing), 'exists')
+  await expectCode(store.migrate(created.workspace.id, join(created.workspace.path, 'nested')), 'invalid-target')
+  await expectCode(store.migrate(created.workspace.id, join(root, 'base')), 'invalid-target')
+})
+
+test('migrating twice moves from the relocated location and re-points the anchor', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  registry.rows[0].sessionIds = ['session-a']
+  const first = join(root, 'one', 'demo')
+  const second = join(root, 'two', 'demo')
+
+  await store.migrate(created.workspace.id, first)
+  const result = await store.migrate(created.workspace.id, second)
+  assert.equal(result.workspace.path, created.workspace.path)
+  assert.equal(result.workspace.relocatedTo, await realpath(second))
+  assert.equal((await realpath(created.workspace.path)).toLowerCase(), (await realpath(second)).toLowerCase())
+  await assert.rejects(lstat(first), /ENOENT/)
+})
+
+test('repair recreates a missing migration anchor', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  registry.rows[0].sessionIds = ['session-a']
+  const target = join(root, 'elsewhere', 'demo')
+  await store.migrate(created.workspace.id, target)
+
+  await rm(created.workspace.path)
+  await assert.rejects(lstat(created.workspace.path), /ENOENT/)
+  const repaired = await store.repair(created.workspace.id)
+  assert.equal(repaired.conflicts.length, 0)
+  assert.equal((await lstat(created.workspace.path)).isSymbolicLink(), true)
+  assert.equal((await realpath(created.workspace.path)).toLowerCase(), (await realpath(target)).toLowerCase())
+})
+
+test('adopt refuses the migrated location of an existing workspace', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  registry.rows[0].sessionIds = ['session-a']
+  const target = join(root, 'elsewhere', 'demo')
+  await store.migrate(created.workspace.id, target)
+
+  await expectCode(store.adopt(target), 'already-managed')
 })

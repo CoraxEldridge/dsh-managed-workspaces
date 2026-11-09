@@ -5,7 +5,7 @@
 
 import { ManagedWorkspaceError } from './store.js'
 
-const ACTIONS = ['status', 'list', 'create', 'adopt', 'attach', 'detach', 'register', 'forget']
+const ACTIONS = ['status', 'list', 'create', 'adopt', 'attach', 'detach', 'migrate', 'register', 'forget']
 
 const PARAMETERS = {
   type: 'object',
@@ -14,7 +14,7 @@ const PARAMETERS = {
     action: {
       type: 'string',
       enum: ACTIONS,
-      description: 'status reads the current session workspace; list reads every managed workspace and the existing workspaces that are not managed yet; create makes a new workspace folder; adopt registers an existing folder (or every existing sidebar workspace) without moving it; attach/detach add or remove one linked folder; register re-registers a workspace in the sidebar; forget removes the plugin record without deleting any folder.',
+      description: 'status reads the current session workspace; list reads every managed workspace and the existing workspaces that are not managed yet; create makes a new workspace folder; adopt registers an existing folder (or every existing sidebar workspace) without moving it; attach/detach add or remove one linked folder; migrate moves the workspace directory while keeping its conversations usable; register re-registers a workspace in the sidebar; forget removes the plugin record without deleting any folder.',
     },
     name: {
       type: 'string',
@@ -27,6 +27,15 @@ const PARAMETERS = {
     all: {
       type: 'boolean',
       description: 'For action=adopt: adopt every sidebar workspace this plugin does not manage yet.',
+    },
+    destination: {
+      type: 'string',
+      description: 'Absolute destination path for action=migrate. It must not exist yet; the workspace directory is moved there.',
+    },
+    mode: {
+      type: 'string',
+      enum: ['auto', 'anchor', 'clean'],
+      description: 'For action=migrate: auto keeps the original path as a link when the workspace still has sessions (required for conversations to keep working) and re-registers a session-less workspace at the new path; anchor always keeps the original path as a link; clean refuses a workspace that still has sessions.',
     },
     alias: {
       type: 'string',
@@ -62,7 +71,13 @@ function linkLines(view) {
 }
 
 function workspaceBlock(view) {
-  return [`Workspace "${view.name}" at ${view.path} [${statusLabel(view)}]`, 'Linked folders:', ...linkLines(view)].join('\n')
+  const lines = [`Workspace "${view.name}" at ${view.path} [${statusLabel(view)}]`]
+  if (view.relocatedTo !== null && view.relocatedTo !== undefined) {
+    lines.push(`Content location: ${view.relocatedTo} (the original path is kept as a link so recorded sessions stay usable)`)
+  }
+  lines.push(`Sessions: ${view.sessionCount ?? 0}`)
+  lines.push('Linked folders:', ...linkLines(view))
+  return lines.join('\n')
 }
 
 function listBlock(state) {
@@ -196,6 +211,23 @@ export function createManagedWorkspaceTool(ctx, store) {
           : 'This folder is already managed.'
         const warning = result.warning === undefined ? '' : `\nWarning: ${result.warning}`
         return { summary: `${headline}\n${workspaceBlock(result.workspace)}${warning}` }
+      }
+
+      if (action === 'migrate') {
+        const record = resolveTarget(args, exec)
+        if (typeof args.destination !== 'string' || args.destination.trim().length === 0) {
+          throw new ManagedWorkspaceError('invalid-target', 'action=migrate requires "destination"')
+        }
+        const result = await store.migrate(record.id, args.destination, { mode: args.mode })
+        const explanation =
+          result.mode === 'anchor'
+            ? `The original path is kept as a directory link to the new location, so the ${result.sessionCount} recorded session(s) and their conversations keep working.`
+            : 'The workspace had no sessions, so it was re-registered at the new path with no link left behind.'
+        const linkNote =
+          result.linkErrors.length === 0 ? '' : `\nLink warnings: ${result.linkErrors.join('; ')}`
+        return {
+          summary: `Moved the workspace content from ${result.source} to ${result.destination} (${result.movedBy}).\n${explanation}${linkNote}\n${workspaceBlock(result.workspace)}`,
+        }
       }
 
       if (action === 'register') {

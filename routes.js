@@ -100,6 +100,7 @@ export function registerRoutes(ctx, store) {
   route('config', async (args) => store.setBaseDirectory(args.baseDirectory))
   route('create', async (args) => store.create(args.name))
   route('adopt', async (args) => (args.all === true ? store.adoptAll() : store.adopt(args.folder)))
+  route('migrate', async (args) => store.migrate(args.id, args.destination, { mode: args.mode }))
   route('attach', async (args) => store.attach(args.id, args.folder, args.alias))
   route('detach', async (args) => store.detach(args.id, args.alias))
   route('register', async (args) => store.register(args.id))

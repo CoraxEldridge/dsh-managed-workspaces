@@ -42,6 +42,16 @@ window.__ModuleLoader__.load({
       'health.conflict': '冲突',
       register: '注册到侧边栏',
       repair: '修复',
+      migrate: '迁移…',
+      migrateCancel: '取消',
+      migrateStart: '开始迁移',
+      migrateTitle: '迁移到新位置',
+      migrateDestination: '目标路径（必须尚不存在）',
+      migrateHint: '会移动工作区目录；普通文件不受影响。',
+      migrateAnchorHint: '该工作区有 {count} 个会话。迁移后原路径会保留为指向新位置的目录链接，历史对话继续可用（会话记录里的工作目录不可修改）。',
+      migrateCleanHint: '该工作区没有会话，将直接迁移并在侧边栏更新为新路径。',
+      migrateConfirm: '现在迁移工作区「{name}」？\n\n{detail}\n\n目标：{destination}',
+      migratedTo: '实际位置',
       forget: '从插件移除',
       forgetConfirm: '从插件移除工作区「{name}」？\n只会删除侧边栏注册与插件记录，不会删除任何文件夹或会话。',
       forgetAdopted: '移出插件',
@@ -85,6 +95,16 @@ window.__ModuleLoader__.load({
       'health.conflict': 'Conflict',
       register: 'Register in sidebar',
       repair: 'Repair',
+      migrate: 'Migrate…',
+      migrateCancel: 'Cancel',
+      migrateStart: 'Migrate',
+      migrateTitle: 'Migrate to a new location',
+      migrateDestination: 'Destination path (must not exist yet)',
+      migrateHint: 'Moves the workspace directory; ordinary files are unaffected.',
+      migrateAnchorHint: 'This workspace has {count} session(s). After migrating, the original path stays as a directory link to the new location so the recorded conversations keep working (a session records its working directory immutably).',
+      migrateCleanHint: 'No session uses this workspace, so it is moved and re-registered at the new path directly.',
+      migrateConfirm: 'Migrate workspace "{name}" now?\n\n{detail}\n\nDestination: {destination}',
+      migratedTo: 'Content location',
       forget: 'Remove from plugin',
       forgetConfirm: 'Remove workspace "{name}" from the plugin?\nOnly the sidebar registration and the plugin record are removed; no folder or session is deleted.',
       forgetAdopted: 'Stop managing',
@@ -143,6 +163,7 @@ window.__ModuleLoader__.load({
 .dsh-mws-code{font-family:var(--dsw-font-family);font-size:12px;color:var(--dsw-alias-label-secondary);}
 .dsh-mws-arrow{color:var(--dsw-alias-label-tertiary);}
 .dsh-mws-addlink{display:flex;flex-direction:column;gap:6px;padding:8px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);}
+.dsh-mws-migrate{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);}
 .dsh-mws-candidate{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);}
 @media (max-width:520px){.dsh-mws-backdrop{padding:0;}.dsh-mws-dialog{max-height:100vh;height:100vh;border-radius:0;}}
 `
@@ -516,6 +537,7 @@ window.__ModuleLoader__.load({
         const ws = props.ws
         const busy = props.busy
         const [expanded, setExpanded] = React.useState(false)
+        const [migrating, setMigrating] = React.useState(false)
         const statusKey =
           ws.directory !== 'ok'
             ? 'status.missing'
@@ -551,10 +573,26 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'dsh-mws-chip ' + tone }, t(statusKey)),
               ),
               h('div', { className: 'dsh-mws-path', title: ws.path }, ws.path),
+              ws.relocatedTo !== null && ws.relocatedTo !== undefined
+                ? h('div', { className: 'dsh-mws-hint' }, t('migratedTo') + ': ' + ws.relocatedTo)
+                : null,
             ),
             h(
               'div',
               { className: 'dsh-mws-actions' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-mws-btn',
+                  disabled: busy !== null || ws.directory !== 'ok',
+                  onClick: () => {
+                    setExpanded(true)
+                    setMigrating(true)
+                  },
+                },
+                t('migrate'),
+              ),
               !ws.registered
                 ? h(
                     'button',
@@ -597,6 +635,7 @@ window.__ModuleLoader__.load({
             ? h(
                 'div',
                 { className: 'dsh-mws-card-body' },
+                migrating ? h(MigrateForm, { t, ws, busy, onClose: () => setMigrating(false) }) : null,
                 h('div', { className: 'dsh-mws-label' }, t('linksLabel')),
                 ws.links.length === 0
                   ? h('div', { className: 'dsh-mws-hint' }, t('linksEmpty'))
@@ -605,6 +644,77 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'dsh-mws-hint' }, t('rootsHint').replace('{roots}', '_roots')),
               )
             : null,
+        )
+      }
+
+      function MigrateForm(props) {
+        const t = props.t
+        const ws = props.ws
+        const busy = props.busy
+        const [destination, setDestination] = React.useState('')
+        const detail =
+          ws.sessionCount > 0
+            ? t('migrateAnchorHint').replace('{count}', String(ws.sessionCount))
+            : t('migrateCleanHint')
+        const submit = async () => {
+          const value = destination.trim()
+          if (value === '') return
+          const confirmed = window
+            .confirm(t('migrateConfirm').replace('{name}', ws.name).replace('{detail}', detail).replace('{destination}', value))
+          if (!confirmed) return
+          const ok = await mutate('migrate', { id: ws.id, destination: value, mode: 'auto' })
+          if (ok) {
+            setDestination('')
+            props.onClose()
+          }
+        }
+        const browse = async () => {
+          const picked = await pickFolder()
+          if (picked === null) return
+          const name = ws.path.split(/[\\/]/).filter(Boolean).pop() ?? 'workspace'
+          const separator = picked.includes('\\') ? '\\' : '/'
+          setDestination(picked.replace(/[\\/]+$/, '') + separator + name)
+        }
+        return h(
+          'div',
+          { className: 'dsh-mws-migrate' },
+          h('div', { className: 'dsh-mws-label' }, t('migrateTitle')),
+          h(
+            'div',
+            { className: 'dsh-mws-row' },
+            h('input', {
+              className: 'dsh-mws-input dsh-mws-grow',
+              value: destination,
+              placeholder: t('migrateDestination'),
+              spellCheck: false,
+              onChange: (event) => setDestination(event.target.value),
+              onKeyDown: (event) => {
+                if (event.key === 'Enter') submit()
+              },
+            }),
+            h('button', { type: 'button', className: 'dsh-mws-btn', onClick: browse }, t('browse')),
+          ),
+          h('div', { className: 'dsh-mws-hint' }, detail),
+          h('div', { className: 'dsh-mws-hint' }, t('migrateHint')),
+          h(
+            'div',
+            { className: 'dsh-mws-row' },
+            h(
+              'button',
+              { type: 'button', className: 'dsh-mws-btn', disabled: busy !== null, onClick: () => props.onClose() },
+              t('migrateCancel'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-mws-btn dsh-mws-primary',
+                disabled: busy !== null || destination.trim() === '',
+                onClick: submit,
+              },
+              t('migrateStart'),
+            ),
+          ),
         )
       }
 

@@ -10,7 +10,7 @@
 
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, readFile, readlink, realpath, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, basename, parse, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
@@ -161,6 +161,95 @@ async function createDirectoryLink(target, linkPath) {
   await symlink(target, linkPath, 'dir')
 }
 
+/** Remove one directory link, refusing to touch a real directory or a link to another target. */
+async function detachLinkNode(linkPath, expectedTarget) {
+  const node = await lstatOrNull(linkPath)
+  if (node === null) return 'missing'
+  if (!node.isSymbolicLink()) fail('conflict', `refusing to remove "${linkPath}": it is a real directory or file, not a link`)
+  const actual = await resolveLink(linkPath)
+  if (!samePath(actual, expectedTarget)) {
+    fail('conflict', `refusing to remove "${linkPath}": it points to ${actual}, not ${expectedTarget}`)
+  }
+  await unlink(linkPath)
+  return 'removed'
+}
+
+/** Ensure a directory link exists at `linkPath`, adopting an equivalent one and refusing conflicts. */
+async function ensureLinkNode(linkPath, target) {
+  const node = await lstatOrNull(linkPath)
+  if (node === null) {
+    await createDirectoryLink(target, linkPath)
+    return
+  }
+  if (!node.isSymbolicLink()) fail('conflict', `path already exists and is not a link: ${linkPath}`)
+  const actual = await resolveLink(linkPath)
+  if (!samePath(actual, target)) fail('conflict', `link points to ${actual}, not ${target}`)
+}
+
+/** Count files, directories, links, and bytes below one directory for copy verification. */
+async function treeSummary(root) {
+  let files = 0
+  let directories = 0
+  let symlinks = 0
+  let bytes = 0
+  const stack = [root]
+  while (stack.length > 0) {
+    const directory = stack.pop()
+    const entries = await readdir(directory, { withFileTypes: true })
+    for (const entry of entries) {
+      const full = join(directory, entry.name)
+      if (entry.isSymbolicLink()) {
+        symlinks += 1
+      } else if (entry.isDirectory()) {
+        directories += 1
+        stack.push(full)
+      } else {
+        files += 1
+        bytes += (await stat(full)).size
+      }
+    }
+  }
+  return { files, directories, symlinks, bytes }
+}
+
+/**
+ * Move a directory: rename when both paths share a volume, otherwise copy,
+ * verify the copy against the source, and only then remove the source.
+ * @param {string} source - existing directory.
+ * @param {string} destination - path that must not exist yet.
+ * @returns {Promise<'rename' | 'copy'>} which mechanism moved the tree.
+ */
+async function moveDirectory(source, destination) {
+  try {
+    await rename(source, destination)
+    return 'rename'
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error
+  }
+  await cp(source, destination, {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+    preserveTimestamps: true,
+  })
+  const left = await treeSummary(source)
+  const right = await treeSummary(destination)
+  const matches =
+    left.files === right.files &&
+    left.directories === right.directories &&
+    left.symlinks === right.symlinks &&
+    left.bytes === right.bytes
+  if (!matches) {
+    await rm(destination, { recursive: true, force: true })
+    fail(
+      'copy-mismatch',
+      `copied tree does not match the source (${JSON.stringify(left)} vs ${JSON.stringify(right)}); the source was kept`,
+    )
+  }
+  await rm(source, { recursive: true, force: true })
+  return 'copy'
+}
+
 function freshManifest() {
   return {
     schemaVersion: MANIFEST_VERSION,
@@ -212,6 +301,9 @@ function normalizeManifest(raw, warnings) {
         id: entry.id,
         name: entry.name,
         path: normalizePath(entry.path),
+        ...(typeof entry.relocatedTo === 'string' && isAbsolute(entry.relocatedTo)
+          ? { relocatedTo: normalizePath(entry.relocatedTo) }
+          : {}),
         createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : new Date(0).toISOString(),
         origin: entry.origin === 'adopted' ? 'adopted' : 'created',
         links,
@@ -325,11 +417,37 @@ export class ManagedWorkspaceStore {
     return join(record.path, this.requireManifest().linksDirectoryName ?? LINKS_DIRECTORY)
   }
 
+  linksDirectoryAt(base) {
+    return join(base, this.requireManifest().linksDirectoryName ?? LINKS_DIRECTORY)
+  }
+
+  /** The registered workspace entity for a record (anchor or migrated location), or null. */
+  registryEntity(record) {
+    if (this.registry === null) return null
+    const match = this.registry.list().find(
+      (workspace) =>
+        samePath(workspace.path, record.path) ||
+        (typeof record.relocatedTo === 'string' && samePath(workspace.path, record.relocatedTo)),
+    )
+    return match ?? null
+  }
+
   /** The registered workspace id for a record, or null. */
   registryWorkspaceId(record) {
-    if (this.registry === null) return null
-    const match = this.registry.list().find((workspace) => samePath(workspace.path, record.path))
-    return match === undefined ? null : String(match.id)
+    const entity = this.registryEntity(record)
+    return entity === null ? null : String(entity.id)
+  }
+
+  /** How many sessions the registry accounts to this workspace. */
+  sessionCountOf(record) {
+    const entity = this.registryEntity(record)
+    const ids = entity?.sessionIds
+    return Array.isArray(ids) ? ids.length : 0
+  }
+
+  /** The physical directory holding the workspace content (anchor resolved). */
+  async realPathOf(record) {
+    return normalizePath(await realpath(record.path))
   }
 
   /** All managed workspace records (loaded state only). */
@@ -371,6 +489,13 @@ export class ManagedWorkspaceStore {
       if (typeof workspace.path !== 'string') continue
       if (this.isFilesystemRoot(workspace.path)) continue
       if (this.manifest.workspaces.some((record) => samePath(record.path, workspace.path))) continue
+      if (
+        this.manifest.workspaces.some(
+          (record) => typeof record.relocatedTo === 'string' && samePath(record.relocatedTo, workspace.path),
+        )
+      ) {
+        continue
+      }
       const title = typeof workspace.title === 'string' && workspace.title.trim().length > 0 ? workspace.title.trim() : basename(workspace.path)
       out.push({ path: normalizePath(workspace.path), title, workspaceId: String(workspace.id) })
     }
@@ -382,6 +507,9 @@ export class ManagedWorkspaceStore {
     if (this.manifest === null || typeof path !== 'string') return null
     for (const workspace of this.manifest.workspaces) {
       if (isUnder(path, workspace.path)) return { workspace, via: 'home' }
+      if (typeof workspace.relocatedTo === 'string' && isUnder(path, workspace.relocatedTo)) {
+        return { workspace, via: 'relocated' }
+      }
     }
     for (const workspace of this.manifest.workspaces) {
       for (const link of workspace.links) {
@@ -415,11 +543,13 @@ export class ManagedWorkspaceStore {
       id: record.id,
       name: record.name,
       path: record.path,
+      relocatedTo: typeof record.relocatedTo === 'string' ? record.relocatedTo : null,
       createdAt: record.createdAt,
       origin: record.origin === 'adopted' ? 'adopted' : 'created',
       directory: (await isDirectory(record.path)) ? 'ok' : 'missing',
       registered: workspaceId !== null,
       workspaceId,
+      sessionCount: this.sessionCountOf(record),
       links,
     }
   }
@@ -552,6 +682,12 @@ export class ManagedWorkspaceStore {
     if (existing !== undefined) {
       return { workspace: await this.view(existing), adopted: false }
     }
+    const relocated = this.requireManifest().workspaces.find(
+      (record) => typeof record.relocatedTo === 'string' && samePath(record.relocatedTo, target),
+    )
+    if (relocated !== undefined) {
+      fail('already-managed', `this folder is already the migrated location of workspace "${relocated.name}"`)
+    }
     const preferred = this.registryTitle(target) ?? basename(target)
     const record = {
       id: `mws-${randomUUID()}`,
@@ -578,6 +714,193 @@ export class ManagedWorkspaceStore {
       registered,
       ...(warning === undefined ? {} : { warning }),
     }
+  }
+
+  /** Recreate a set of recorded links under one base directory (best effort). */
+  async restoreLinks(links, base) {
+    const errors = []
+    if (links.length === 0) return errors
+    const roots = this.linksDirectoryAt(base)
+    await mkdir(roots, { recursive: true })
+    for (const link of links) {
+      try {
+        await ensureLinkNode(join(roots, link.alias), link.target)
+      } catch (error) {
+        errors.push(`${link.alias}: ${errorMessage(error)}`)
+      }
+    }
+    return errors
+  }
+
+  /** Remove every recorded link node below a base directory, returning the removed ones. */
+  async detachRecordLinks(record, base) {
+    const roots = this.linksDirectoryAt(base)
+    const detached = []
+    for (const link of record.links) {
+      const result = await detachLinkNode(join(roots, link.alias), link.target)
+      if (result === 'removed') detached.push(link)
+    }
+    return detached
+  }
+
+  /** Point the stable anchor path at the migrated directory, replacing a stale link. */
+  async ensureAnchorLink(record, destination, previous) {
+    const anchor = record.path
+    const node = await lstatOrNull(anchor)
+    if (node === null) {
+      await mkdir(dirname(anchor), { recursive: true })
+      await createDirectoryLink(destination, anchor)
+      return
+    }
+    if (!node.isSymbolicLink()) {
+      fail('conflict', `refusing to replace "${anchor}": it is a real directory or file`)
+    }
+    const actual = await resolveLink(anchor)
+    if (samePath(actual, destination)) return
+    if (!samePath(actual, previous) && !isUnder(actual, previous)) {
+      fail('conflict', `refusing to replace "${anchor}": it points to ${actual}`)
+    }
+    await unlink(anchor)
+    await createDirectoryLink(destination, anchor)
+  }
+
+  /**
+   * Move a workspace's directory to a new location.
+   *
+   * A session records its original working directory immutably, and the
+   * workspace registry groups sessions by that recorded path. Moving the
+   * folder would strand every conversation, so a workspace that still has
+   * sessions keeps its original path as a directory link to the new location
+   * (`anchor` mode). A workspace without sessions is re-registered at the new
+   * path instead (`clean` mode), leaving no link behind.
+   */
+  async migrate(id, destination, options = {}) {
+    await this.load()
+    return this.run(async () => {
+      const record = this.mustFind(id)
+      const raw = typeof destination === 'string' ? destination.trim() : ''
+      if (raw.length === 0) fail('invalid-target', 'destination must be a non-blank absolute path')
+      const expanded = expandHomePath(raw)
+      if (!isAbsolute(expanded)) fail('invalid-target', `destination must be absolute: ${JSON.stringify(destination)}`)
+      const target = normalizePath(expanded)
+      if (this.isFilesystemRoot(target)) fail('invalid-target', `a filesystem root cannot be a workspace: ${target}`)
+      if (samePath(target, this.requireManifest().baseDirectory)) {
+        fail('invalid-target', 'the workspace base directory cannot itself be a workspace')
+      }
+      if ((await lstatOrNull(target)) !== null) fail('exists', `destination already exists: ${target}`)
+
+      const source = await this.realPathOf(record)
+      if (samePath(target, source)) fail('invalid-target', 'destination is the current workspace location')
+      if (isUnder(target, source)) fail('invalid-target', 'cannot move a workspace into itself')
+      if (isUnder(source, target)) fail('invalid-target', 'cannot move a workspace onto its own parent')
+      for (const link of record.links) {
+        if (isUnder(target, link.target)) fail('invalid-target', 'cannot move a workspace into one of its linked folders')
+      }
+      if (this.registry !== null) {
+        const clash = this.registry
+          .list()
+          .find(
+            (workspace) =>
+              samePath(workspace.path, target) &&
+              !samePath(workspace.path, record.path) &&
+              !(typeof record.relocatedTo === 'string' && samePath(workspace.path, record.relocatedTo)),
+          )
+        if (clash !== undefined) fail('exists', `another registered workspace already uses ${target}`)
+      }
+      if (
+        this.listSync().some(
+          (other) =>
+            other.id !== record.id &&
+            (samePath(other.path, target) ||
+              (typeof other.relocatedTo === 'string' && samePath(other.relocatedTo, target))),
+        )
+      ) {
+        fail('exists', `another managed workspace already uses ${target}`)
+      }
+
+      const sessionCount = this.sessionCountOf(record)
+      const requested = options.mode === undefined ? 'auto' : String(options.mode)
+      if (!['auto', 'anchor', 'clean'].includes(requested)) fail('invalid-mode', `unknown migration mode: ${requested}`)
+      const mode = requested === 'auto' ? (sessionCount === 0 ? 'clean' : 'anchor') : requested
+      if (mode === 'clean' && sessionCount > 0) {
+        fail(
+          'sessions-present',
+          `this workspace still has ${sessionCount} session(s); a clean migration would detach them. Use the anchor mode instead.`,
+        )
+      }
+
+      let detached = []
+      try {
+        detached = await this.detachRecordLinks(record, source)
+      } catch (error) {
+        const errors = await this.restoreLinks(detached, source)
+        fail(
+          'conflict',
+          `cannot prepare links for the move: ${errorMessage(error)}${errors.length > 0 ? `; restoring them also failed: ${errors.join('; ')}` : ''}`,
+        )
+      }
+
+      let movedBy
+      try {
+        await mkdir(dirname(target), { recursive: true })
+        movedBy = await moveDirectory(source, target)
+      } catch (error) {
+        const errors = await this.restoreLinks(detached, source)
+        fail(
+          'move-failed',
+          `${errorMessage(error)}${errors.length > 0 ? `; restoring links also failed: ${errors.join('; ')}` : ''}`,
+        )
+      }
+
+      const linksDirName = this.requireManifest().linksDirectoryName ?? LINKS_DIRECTORY
+      const linkErrors = record.links.length > 0 ? await this.restoreLinks(record.links, target) : []
+      if (!(await isDirectory(join(target, linksDirName))) && record.origin !== 'adopted') {
+        await mkdir(join(target, linksDirName), { recursive: true })
+      }
+
+      if (mode === 'clean') {
+        try {
+          const entity = this.registryEntity(record)
+          if (entity !== null) await this.registry.delete(String(entity.id))
+          if (this.registry !== null) await this.registry.create(target, record.name)
+        } catch (error) {
+          record.relocatedTo = target
+          await this.persist()
+          fail(
+            'registration-failed',
+            `the directory moved to ${target}, but re-registering it failed: ${errorMessage(error)}. Run repair to re-anchor the original path.`,
+          )
+        }
+        record.path = target
+        delete record.relocatedTo
+        await this.persist()
+        return { workspace: await this.view(record), mode, source, destination: target, sessionCount, linkErrors, movedBy }
+      }
+
+      try {
+        await this.ensureAnchorLink(record, target, source)
+      } catch (anchorError) {
+        try {
+          await moveDirectory(target, source)
+          await this.restoreLinks(record.links, source)
+          if (typeof record.relocatedTo === 'string') await this.ensureAnchorLink(record, record.relocatedTo, source)
+        } catch (rollbackError) {
+          record.relocatedTo = target
+          await this.persist()
+          fail(
+            'migration-incomplete',
+            `moved to ${target}, but the original path ${record.path} is unusable (${errorMessage(anchorError)}) and rolling back failed (${errorMessage(rollbackError)}). Create a link from ${record.path} to ${target} manually, then run repair.`,
+          )
+        }
+        fail(
+          'migration-rollback',
+          `could not keep the original path usable (${errorMessage(anchorError)}); the directory was moved back to ${source}`,
+        )
+      }
+      record.relocatedTo = target
+      await this.persist()
+      return { workspace: await this.view(record), mode, source, destination: target, sessionCount, linkErrors, movedBy }
+    })
   }
 
   async attach(id, folder, alias) {
@@ -694,14 +1017,33 @@ export class ManagedWorkspaceStore {
       const record = this.mustFind(id)
       const repaired = []
       const conflicts = []
-      if (!(await isDirectory(record.path))) {
+      const relocated = typeof record.relocatedTo === 'string' ? record.relocatedTo : null
+
+      if (relocated !== null) {
+        if (!(await isDirectory(relocated))) {
+          fail('missing', `the migrated workspace folder is missing and will not be recreated: ${relocated}`)
+        }
+        // The original path is the anchor every recorded session still uses.
+        try {
+          await this.ensureAnchorLink(record, relocated, relocated)
+          if (!(await isDirectory(record.path))) {
+            conflicts.push(`anchor ${record.path} does not resolve to ${relocated}`)
+          } else if (await samePath(await this.realPathOf(record), relocated)) {
+            if (repaired.length === 0) repaired.push('anchor')
+          }
+        } catch (error) {
+          conflicts.push(`anchor: ${errorMessage(error)}`)
+        }
+      } else if (!(await isDirectory(record.path))) {
         if (record.origin === 'adopted') {
           fail('missing', `the adopted workspace folder is missing and will not be recreated: ${record.path}`)
         }
         await mkdir(record.path, { recursive: true })
         repaired.push('workspace folder')
       }
-      const roots = this.linksDirectory(record)
+
+      const base = relocated ?? record.path
+      const roots = this.linksDirectoryAt(base)
       // A created workspace always owns its _roots; an adopted one gets it only
       // when a linked folder actually needs it, so adoption leaves no trace.
       if (!(await isDirectory(roots)) && (record.links.length > 0 || record.origin !== 'adopted')) {

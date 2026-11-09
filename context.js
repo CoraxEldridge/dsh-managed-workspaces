@@ -16,6 +16,9 @@ export function renderContext(workspace, linksDirectoryName) {
     `Managed workspace "${workspace.name}"`,
     `Root: "${workspace.path}"`,
   ]
+  if (typeof workspace.relocatedTo === 'string' && workspace.relocatedTo !== workspace.path) {
+    lines.push(`Content location: "${workspace.relocatedTo}" (Root is a link to it; use Root for every path).`)
+  }
   if (links.length === 0) {
     lines.push('Linked folders: none.')
   } else {
@@ -68,6 +71,9 @@ export function registerManagedWorkspaceContext(ctx, store) {
         {
           name: found.workspace.name,
           path: found.workspace.path,
+          ...(typeof found.workspace.relocatedTo === 'string'
+            ? { relocatedTo: found.workspace.relocatedTo }
+            : {}),
           links: found.workspace.links.map((link) => ({ alias: link.alias, target: link.target })),
         },
         linksDirectoryName,
