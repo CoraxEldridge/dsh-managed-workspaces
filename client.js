@@ -52,6 +52,25 @@ window.__ModuleLoader__.load({
       migrateCleanHint: '该工作区没有会话，将直接迁移并在侧边栏更新为新路径。',
       migrateConfirm: '现在迁移工作区「{name}」？\n\n{detail}\n\n目标：{destination}',
       migratedTo: '实际位置',
+      'menu.manage': '打开托管面板',
+      'menu.attach': '关联文件夹…',
+      'menu.migrate': '迁移…',
+      'menu.repair': '修复',
+      'menu.forget': '移出插件',
+      'menu.adopt': '接入托管工作区',
+      'flow.title': '添加工作区',
+      'flow.subtitle': '由「托管工作区」接管添加流程',
+      'flow.create': '新建托管工作区',
+      'flow.createHint': '在根目录下创建一个新工作区文件夹',
+      'flow.namePlaceholder': '工作区名称',
+      'flow.pick': '选择已有文件夹',
+      'flow.pickHint': '把已存在的文件夹添加为工作区（官方流程）',
+      'flow.adopt': '接入已有工作区',
+      'flow.adoptHint': '把侧边栏里尚未托管的工作区纳入插件',
+      'flow.manage': '打开托管面板',
+      'flow.cancel': '取消',
+      'flow.busy': '处理中…',
+      'flow.none': '没有待接入的工作区。',
       forget: '从插件移除',
       forgetConfirm: '从插件移除工作区「{name}」？\n只会删除侧边栏注册与插件记录，不会删除任何文件夹或会话。',
       forgetAdopted: '移出插件',
@@ -105,6 +124,25 @@ window.__ModuleLoader__.load({
       migrateCleanHint: 'No session uses this workspace, so it is moved and re-registered at the new path directly.',
       migrateConfirm: 'Migrate workspace "{name}" now?\n\n{detail}\n\nDestination: {destination}',
       migratedTo: 'Content location',
+      'menu.manage': 'Open managed workspace panel',
+      'menu.attach': 'Link a folder…',
+      'menu.migrate': 'Migrate…',
+      'menu.repair': 'Repair',
+      'menu.forget': 'Remove from plugin',
+      'menu.adopt': 'Adopt into managed workspaces',
+      'flow.title': 'Add workspace',
+      'flow.subtitle': 'The managed-workspace plugin handles this flow',
+      'flow.create': 'New managed workspace',
+      'flow.createHint': 'Create a new workspace folder under the base directory',
+      'flow.namePlaceholder': 'Workspace name',
+      'flow.pick': 'Choose an existing folder',
+      'flow.pickHint': 'Add an existing folder as a workspace (original flow)',
+      'flow.adopt': 'Adopt an existing workspace',
+      'flow.adoptHint': 'Bring a sidebar workspace that is not managed yet under the plugin',
+      'flow.manage': 'Open the managed workspace panel',
+      'flow.cancel': 'Cancel',
+      'flow.busy': 'Working…',
+      'flow.none': 'No workspace is waiting to be adopted.',
       forget: 'Remove from plugin',
       forgetConfirm: 'Remove workspace "{name}" from the plugin?\nOnly the sidebar registration and the plugin record are removed; no folder or session is deleted.',
       forgetAdopted: 'Stop managing',
@@ -166,6 +204,15 @@ window.__ModuleLoader__.load({
 .dsh-mws-migrate{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);}
 .dsh-mws-candidate{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);}
 @media (max-width:520px){.dsh-mws-backdrop{padding:0;}.dsh-mws-dialog{max-height:100vh;height:100vh;border-radius:0;}}
+.dsh-mws-flow-backdrop{position:fixed;inset:0;z-index:9998;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(10,14,26,.35);}
+.dsh-mws-flow-dialog{display:flex;flex-direction:column;gap:10px;width:min(520px,100%);max-height:min(80vh,640px);overflow:auto;padding:16px;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-xl);box-shadow:var(--dsw-elevation-panel);font-family:var(--dsw-font-family);color:var(--dsw-alias-label-primary);}
+.dsh-mws-flow-head{display:flex;align-items:flex-start;gap:10px;}
+.dsh-mws-flow-option{display:flex;flex-direction:column;gap:3px;padding:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);cursor:pointer;text-align:left;font:inherit;color:inherit;}
+.dsh-mws-flow-option:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);}
+.dsh-mws-flow-option:disabled{opacity:.5;cursor:default;}
+.dsh-mws-flow-option-title{font-size:13px;font-weight:600;}
+.dsh-mws-flow-option-hint{font-size:12px;color:var(--dsw-alias-label-tertiary);}
+.dsh-mws-flow-candidate{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);font-size:12px;}
 `
 
     function apply(ctx) {
@@ -263,6 +310,102 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const caseInsensitivePaths =
+        typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent)
+
+      function normalizeClientPath(value) {
+        const raw = String(value ?? '').replace(/[\\/]+$/, '').replace(/\//g, '\\')
+        return caseInsensitivePaths ? raw.toLowerCase() : raw
+      }
+
+      function findManagedByPath(path) {
+        const needle = normalizeClientPath(path)
+        const list = snapshot.data?.workspaces ?? []
+        for (const workspace of list) {
+          if (normalizeClientPath(workspace.path) === needle) return workspace
+          if (typeof workspace.relocatedTo === 'string' && normalizeClientPath(workspace.relocatedTo) === needle) {
+            return workspace
+          }
+        }
+        return undefined
+      }
+
+      function openPanel(focusId, focusMode) {
+        setSnapshot({ open: true, focusId: focusId ?? null, focusMode: focusMode ?? null })
+        if (snapshot.data === null && snapshot.loading === false) refresh()
+      }
+
+      function closePanel() {
+        setSnapshot({ open: false, focusId: null, focusMode: null })
+      }
+
+      refresh().catch(() => {})
+
+      ctx.inject(['contextMenus'], (scope) => {
+        scope.effect(
+          () =>
+            scope.contextMenus.register({
+              id: 'managed-workspace.actions',
+              target: 'workspace',
+              order: 250,
+              resolve: async ({ path }) => {
+                if (snapshot.data === null && snapshot.loading === false) await refresh()
+                const managed = findManagedByPath(path)
+                if (managed === undefined) {
+                  return [
+                    {
+                      id: 'managed-adopt',
+                      label: translate('menu.adopt'),
+                      separatorBefore: true,
+                      run: () => {
+                        mutate('adopt', { folder: path })
+                      },
+                    },
+                  ]
+                }
+                const adopted = managed.origin === 'adopted'
+                return [
+                  {
+                    id: 'managed-manage',
+                    label: translate('menu.manage'),
+                    separatorBefore: true,
+                    run: () => openPanel(managed.id),
+                  },
+                  {
+                    id: 'managed-attach',
+                    label: translate('menu.attach'),
+                    run: () => openPanel(managed.id, 'attach'),
+                  },
+                  {
+                    id: 'managed-migrate',
+                    label: translate('menu.migrate'),
+                    run: () => openPanel(managed.id, 'migrate'),
+                  },
+                  {
+                    id: 'managed-repair',
+                    label: translate('menu.repair'),
+                    run: () => {
+                      mutate('repair', { id: managed.id })
+                    },
+                  },
+                  {
+                    id: 'managed-forget',
+                    label: adopted ? translate('forgetAdopted') : translate('forget'),
+                    danger: true,
+                    run: () => {
+                      const template = adopted ? translate('forgetAdoptedConfirm') : translate('forgetConfirm')
+                      if (window.confirm(template.replace('{name}', managed.name))) {
+                        mutate('forget', { id: managed.id })
+                      }
+                    },
+                  },
+                ]
+              },
+            }),
+          'dsh-managed-workspaces: workspace context menu',
+        )
+      })
+
       function icon() {
         return h(
           'svg',
@@ -288,8 +431,7 @@ window.__ModuleLoader__.load({
         const state = React.useSyncExternalStore(subscribe, getSnapshot)
         const wide = props.wide === true
         const open = () => {
-          setSnapshot({ open: true })
-          if (snapshot.data === null && snapshot.loading === false) refresh()
+          openPanel(null, null)
         }
         return h(
           'button',
@@ -314,7 +456,7 @@ window.__ModuleLoader__.load({
         React.useEffect(() => {
           if (!state.open) return undefined
           const onKey = (event) => {
-            if (event.key === 'Escape') setSnapshot({ open: false })
+            if (event.key === 'Escape') closePanel()
           }
           window.addEventListener('keydown', onKey, true)
           return () => window.removeEventListener('keydown', onKey, true)
@@ -335,7 +477,7 @@ window.__ModuleLoader__.load({
           {
             className: 'dsh-mws-backdrop',
             onMouseDown: (event) => {
-              if (event.target === event.currentTarget) setSnapshot({ open: false })
+              if (event.target === event.currentTarget) closePanel()
             },
           },
           h(
@@ -363,7 +505,7 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   className: 'dsh-mws-close',
                   'aria-label': t('close'),
-                  onClick: () => setSnapshot({ open: false }),
+                  onClick: () => closePanel(),
                 },
                 '×',
               ),
@@ -374,7 +516,13 @@ window.__ModuleLoader__.load({
               state.error !== null ? h('div', { className: 'dsh-mws-error', role: 'alert' }, state.error) : null,
               state.loading && state.data === null ? h('div', { className: 'dsh-mws-hint' }, t('loading')) : null,
               state.data !== null
-                ? h(Content, { t, data: state.data, busy: state.busy })
+                ? h(Content, {
+                    t,
+                    data: state.data,
+                    busy: state.busy,
+                    focusId: state.focusId,
+                    focusMode: state.focusMode,
+                  })
                 : null,
             ),
           ),
@@ -485,7 +633,15 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dsh-mws-label' }, t('workspacesLabel')),
             data.workspaces.length === 0
               ? h('div', { className: 'dsh-mws-hint' }, t('workspacesEmpty'))
-              : data.workspaces.map((workspace) => h(WorkspaceCard, { key: workspace.id, t, ws: workspace, busy })),
+              : data.workspaces.map((workspace) =>
+                  h(WorkspaceCard, {
+                    key: workspace.id,
+                    t,
+                    ws: workspace,
+                    busy,
+                    focus: props.focusId === workspace.id ? props.focusMode : undefined,
+                  }),
+                ),
           ),
           h('div', { className: 'dsh-mws-hint' }, t('footerHint')),
         )
@@ -536,8 +692,22 @@ window.__ModuleLoader__.load({
         const t = props.t
         const ws = props.ws
         const busy = props.busy
+        const focus = props.focus
         const [expanded, setExpanded] = React.useState(false)
         const [migrating, setMigrating] = React.useState(false)
+        const cardRef = React.useRef(null)
+        React.useEffect(() => {
+          if (focus === undefined) return
+          setExpanded(true)
+          if (focus === 'migrate') setMigrating(true)
+          if (cardRef.current !== null) {
+            try {
+              cardRef.current.scrollIntoView({ block: 'nearest' })
+            } catch {
+              // Scrolling is best effort.
+            }
+          }
+        }, [focus])
         const statusKey =
           ws.directory !== 'ok'
             ? 'status.missing'
@@ -547,7 +717,7 @@ window.__ModuleLoader__.load({
         const tone = ws.directory !== 'ok' ? 'bad' : ws.registered ? 'ok' : 'warn'
         return h(
           'div',
-          { className: 'dsh-mws-card' },
+          { className: 'dsh-mws-card', ref: cardRef },
           h(
             'div',
             { className: 'dsh-mws-card-head' },
@@ -815,6 +985,167 @@ window.__ModuleLoader__.load({
         )
       }
 
+      /**
+       * Occupant of the sidebar "Add workspace" directory hole. It shadows the
+       * official picker deterministically (lower `priority` wins a single slot)
+       * and preserves the official path by delegating a chosen folder back to the
+       * flow owner, which registers it and opens a session.
+       */
+      function ManagedDirectoryFlow(props) {
+        const t = props.t ?? translate
+        const open = props.open === true
+        const busy = props.busy === true
+        const state = React.useSyncExternalStore(subscribe, getSnapshot)
+        const [name, setName] = React.useState('')
+        const [showCreate, setShowCreate] = React.useState(false)
+        const [working, setWorking] = React.useState(false)
+        React.useEffect(() => {
+          if (!open) {
+            setShowCreate(false)
+            setName('')
+            return
+          }
+          if (snapshot.data === null && snapshot.loading === false) refresh()
+        }, [open])
+        if (!open) return null
+        const disabled = busy || working
+        const candidates = state.data?.candidates ?? []
+
+        const createManaged = async () => {
+          const value = name.trim()
+          if (value === '' || disabled) return
+          setWorking(true)
+          try {
+            const body = await call('create', { name: value })
+            setName('')
+            setShowCreate(false)
+            props.onPicked(body.workspace.path)
+          } catch (error) {
+            props.onError(messageOf(error))
+          } finally {
+            setWorking(false)
+          }
+        }
+        const pickExisting = async () => {
+          if (disabled) return
+          const picked = await pickFolder()
+          if (picked !== null) props.onPicked(picked)
+        }
+        const adoptCandidate = async (candidate) => {
+          if (disabled) return
+          setWorking(true)
+          try {
+            await call('adopt', { folder: candidate.path })
+            await refresh()
+            props.onPicked(candidate.path)
+          } catch (error) {
+            props.onError(messageOf(error))
+          } finally {
+            setWorking(false)
+          }
+        }
+        const manage = () => {
+          openPanel(null, null)
+          props.onCancel()
+        }
+        const option = (key, title, hint, onClick) =>
+          h(
+            'button',
+            { key, type: 'button', className: 'dsh-mws-flow-option', disabled, onClick },
+            h('span', { className: 'dsh-mws-flow-option-title' }, title),
+            hint === '' ? null : h('span', { className: 'dsh-mws-flow-option-hint' }, hint),
+          )
+
+        return h(
+          'div',
+          {
+            className: 'dsh-mws-flow-backdrop',
+            onMouseDown: (event) => {
+              if (event.target === event.currentTarget) props.onCancel()
+            },
+          },
+          h(
+            'div',
+            {
+              className: 'dsh-mws-flow-dialog',
+              role: 'dialog',
+              'aria-modal': 'true',
+              'aria-label': t('flow.title'),
+            },
+            h(
+              'div',
+              { className: 'dsh-mws-flow-head' },
+              h(
+                'div',
+                { className: 'dsh-mws-grow' },
+                h('div', { className: 'dsh-mws-title' }, t('flow.title')),
+                h('div', { className: 'dsh-mws-subtitle' }, t('flow.subtitle')),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-mws-close',
+                  'aria-label': t('flow.cancel'),
+                  onClick: () => props.onCancel(),
+                },
+                '×',
+              ),
+            ),
+            option('create', t('flow.create'), t('flow.createHint'), () => setShowCreate(!showCreate)),
+            showCreate
+              ? h(
+                  'div',
+                  { className: 'dsh-mws-row' },
+                  h('input', {
+                    className: 'dsh-mws-input dsh-mws-grow',
+                    value: name,
+                    placeholder: t('flow.namePlaceholder'),
+                    spellCheck: false,
+                    onChange: (event) => setName(event.target.value),
+                    onKeyDown: (event) => {
+                      if (event.key === 'Enter') createManaged()
+                    },
+                  }),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-mws-btn dsh-mws-primary',
+                      disabled: disabled || name.trim() === '',
+                      onClick: createManaged,
+                    },
+                    t('create'),
+                  ),
+                )
+              : null,
+            option('pick', t('flow.pick'), t('flow.pickHint'), pickExisting),
+            option('manage', t('flow.manage'), '', manage),
+            h('div', { className: 'dsh-mws-label' }, t('flow.adopt')),
+            h('div', { className: 'dsh-mws-hint' }, t('flow.adoptHint')),
+            candidates.length === 0 ? h('div', { className: 'dsh-mws-hint' }, t('flow.none')) : null,
+            candidates.map((candidate) =>
+              h(
+                'div',
+                { key: candidate.path, className: 'dsh-mws-flow-candidate' },
+                h(
+                  'div',
+                  { className: 'dsh-mws-card-text' },
+                  h('div', { className: 'dsh-mws-card-name' }, candidate.title),
+                  h('div', { className: 'dsh-mws-path', title: candidate.path }, candidate.path),
+                ),
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-mws-btn', disabled, onClick: () => adoptCandidate(candidate) },
+                  t('adopt'),
+                ),
+              ),
+            ),
+            busy || working ? h('div', { className: 'dsh-mws-hint' }, t('flow.busy')) : null,
+          ),
+        )
+      }
+
       ctx.slots.inject('sidebar.footer.action', () =>
         ctx.slots.register(
           {
@@ -837,6 +1168,20 @@ window.__ModuleLoader__.load({
             locale: NS,
           },
           Overlay,
+        ),
+      )
+
+      // A single-slot hole resolves to the lowest `priority` occupant, so this
+      // registration deterministically takes over the sidebar add-workspace flow.
+      ctx.slots.inject('sidebar.workspaces.directoryFlow', () =>
+        ctx.slots.register(
+          {
+            name: 'sidebar.workspaces.directoryFlow',
+            id: 'dsh-managed-workspaces-flow',
+            priority: -1,
+            locale: NS,
+          },
+          ManagedDirectoryFlow,
         ),
       )
 
