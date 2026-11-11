@@ -438,8 +438,23 @@ export class ManagedWorkspaceStore {
     return entity === null ? null : String(entity.id)
   }
 
-  /** How many sessions the registry accounts to this workspace. */
+  /** Session ids whose recorded canonical working directory is `path`. */
+  sessionIdsAt(path) {
+    const ids = new Set()
+    const map = this.registry?.sessionPaths
+    if (map instanceof Map) {
+      for (const [id, cwd] of map) {
+        if (typeof cwd === 'string' && samePath(cwd, path)) ids.add(String(id))
+      }
+    }
+    return [...ids]
+  }
+
+  /** How many sessions belong to this workspace at its physical location. */
   sessionCountOf(record) {
+    const canonical = typeof record.relocatedTo === 'string' ? record.relocatedTo : record.path
+    const found = this.sessionIdsAt(canonical)
+    if (found.length > 0) return found.length
     const entity = this.registryEntity(record)
     const ids = entity?.sessionIds
     return Array.isArray(ids) ? ids.length : 0
@@ -774,6 +789,74 @@ export class ManagedWorkspaceStore {
    * (`anchor` mode). A workspace without sessions is re-registered at the new
    * path instead (`clean` mode), leaving no link behind.
    */
+  /**
+   * Point the registry at the physical (canonical) location and re-attach its
+   * sessions. DSH groups sessions by `realpath(cwd)` compared to the record
+   * path, so a registration left on the old anchor path reports no sessions
+   * once that path becomes a link.
+   */
+  async syncRegistration(record, target, previous) {
+    if (this.registry === null) return { attached: [], errors: [] }
+    let entity = this.registryEntity(record)
+    if (entity === null && typeof previous === 'string') {
+      entity = this.registry.list().find((workspace) => samePath(workspace.path, previous)) ?? null
+    }
+    if (entity === null) entity = await this.registry.create(target, record.name)
+
+    const candidates = new Set()
+    for (const id of this.sessionIdsAt(target)) candidates.add(id)
+    for (const id of this.sessionIdsAt(record.path)) candidates.add(id)
+    if (typeof previous === 'string') {
+      for (const id of this.sessionIdsAt(previous)) candidates.add(id)
+    }
+    const raw = Array.isArray(entity.record?.sessionIds)
+      ? entity.record.sessionIds
+      : Array.isArray(entity.sessionIds)
+        ? entity.sessionIds
+        : []
+    for (const id of raw) candidates.add(id)
+    if (Array.isArray(entity.sessionIds)) {
+      for (const id of entity.sessionIds) candidates.add(id)
+    }
+
+    if (!samePath(entity.path, target)) {
+      // Teach the registry the new canonical path before the record moves, so
+      // its candidate pruning keeps the sessions instead of dropping them.
+      const remember = this.registry?.host?.rememberSessionPath
+      if (typeof remember === 'function') {
+        for (const id of candidates) remember(id, target)
+      }
+      if (typeof entity.mutate === 'function') {
+        await entity.mutate((current) => ({ ...current, path: target }))
+      } else {
+        await this.registry.delete(String(entity.id))
+        entity = await this.registry.create(target, record.name)
+      }
+    }
+
+    const attached = []
+    const errors = []
+    const current = Array.isArray(entity.record?.sessionIds)
+      ? entity.record.sessionIds
+      : Array.isArray(entity.sessionIds)
+        ? entity.sessionIds
+        : []
+    for (const id of candidates) {
+      if (current.includes(id)) continue
+      if (typeof entity.attachSession !== 'function') {
+        errors.push(`${id}: the registry cannot attach sessions`)
+        continue
+      }
+      try {
+        await entity.attachSession(id)
+        attached.push(id)
+      } catch (error) {
+        errors.push(`${id}: ${errorMessage(error)}`)
+      }
+    }
+    return { attached, errors }
+  }
+
   async migrate(id, destination, options = {}) {
     await this.load()
     return this.run(async () => {
@@ -899,7 +982,26 @@ export class ManagedWorkspaceStore {
       }
       record.relocatedTo = target
       await this.persist()
-      return { workspace: await this.view(record), mode, source, destination: target, sessionCount, linkErrors, movedBy }
+      let sync = { attached: [], errors: [] }
+      try {
+        sync = await this.syncRegistration(record, target, source)
+      } catch (error) {
+        fail(
+          'registration-failed',
+          `the directory moved to ${target} and the original path is a link, but the registry could not be pointed at the new location: ${errorMessage(error)}. Run repair to finish.`,
+        )
+      }
+      return {
+        workspace: await this.view(record),
+        mode,
+        source,
+        destination: target,
+        sessionCount,
+        linkErrors,
+        movedBy,
+        attachedSessions: sync.attached.length,
+        attachErrors: sync.errors,
+      }
     })
   }
 
@@ -1033,6 +1135,13 @@ export class ManagedWorkspaceStore {
           }
         } catch (error) {
           conflicts.push(`anchor: ${errorMessage(error)}`)
+        }
+        try {
+          const attach = await this.syncRegistration(record, relocated)
+          if (repaired.length === 0) repaired.push('registration')
+          if (attach.errors.length > 0) conflicts.push(...attach.errors)
+        } catch (error) {
+          conflicts.push(`registration: ${errorMessage(error)}`)
         }
       } else if (!(await isDirectory(record.path))) {
         if (record.origin === 'adopted') {

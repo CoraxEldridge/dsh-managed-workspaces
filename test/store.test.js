@@ -37,19 +37,40 @@ async function expectCode(promise, code) {
 
 /** Minimal in-memory stand-in for the host workspace registry. */
 function fakeRegistry(rows = []) {
-  const list = rows.map((row, index) => ({
-    id: row.id ?? `w-${index}`,
-    path: row.path,
-    title: row.title ?? 'workspace',
-    sessionIds: Array.isArray(row.sessionIds) ? [...row.sessionIds] : [],
-  }))
+  const sessionPaths = new Map()
+  const make = (row, index) => {
+    const entity = {
+      id: row.id ?? `w-${index}`,
+      path: row.path,
+      title: row.title ?? 'workspace',
+      sessionIds: Array.isArray(row.sessionIds) ? [...row.sessionIds] : [],
+      async attachSession(id) {
+        if (!this.sessionIds.includes(id)) {
+          this.sessionIds = [id, ...this.sessionIds]
+          this.record.sessionIds = this.sessionIds
+        }
+      },
+    }
+    entity.record = { path: entity.path, title: entity.title, sessionIds: entity.sessionIds }
+    entity.mutate = async (fn) => {
+      const next = fn(entity.record)
+      entity.record = next
+      entity.path = next.path
+      entity.title = next.title
+      entity.sessionIds = next.sessionIds
+    }
+    return entity
+  }
+  const list = rows.map(make)
   return {
     rows: list,
+    sessionPaths,
+    host: { rememberSessionPath: (id, path) => sessionPaths.set(id, path) },
     list: () => list,
     async create(path, title) {
       const found = list.find((row) => row.path.toLowerCase() === path.toLowerCase())
       if (found !== undefined) return found
-      const row = { id: `w-${list.length}`, path, title: title ?? 'workspace', sessionIds: [] }
+      const row = make({ path, title: title ?? 'workspace', sessionIds: [] }, list.length)
       list.push(row)
       return row
     },
@@ -383,7 +404,11 @@ test('migrate keeps an anchor link when the workspace has sessions', async (t) =
   const created = await store.create('demo')
   const oldPath = created.workspace.path
   registry.rows[0].sessionIds = ['session-a', 'session-b']
+  registry.rows[0].record.sessionIds = ['session-a', 'session-b']
+  registry.sessionPaths.set('session-a', oldPath)
+  registry.sessionPaths.set('session-b', oldPath)
   const target = join(root, 'elsewhere', 'demo')
+  registry.sessionPaths.set('session-c', target)
 
   const result = await store.migrate(created.workspace.id, target)
   assert.equal(result.mode, 'anchor')
@@ -391,17 +416,20 @@ test('migrate keeps an anchor link when the workspace has sessions', async (t) =
   assert.equal(result.workspace.path, oldPath)
   assert.equal(result.workspace.relocatedTo, await realpath(target))
   assert.equal(result.workspace.registered, true)
-  assert.equal(result.workspace.sessionCount, 2)
+  assert.equal(result.workspace.sessionCount, 3)
+  assert.equal(result.attachedSessions, 1)
 
   const anchor = await lstat(oldPath)
   assert.equal(anchor.isSymbolicLink(), true)
   assert.equal((await realpath(oldPath)).toLowerCase(), (await realpath(target)).toLowerCase())
   assert.equal((await readdir(target)).includes('_roots'), true)
 
-  // The registration itself is untouched, so the recorded sessions stay grouped.
+  // The registration follows the physical location so realpath(cwd) matching
+  // keeps every recorded session grouped under the workspace.
   assert.equal(registry.rows.length, 1)
   assert.equal(registry.rows[0].id, 'w-0')
-  assert.equal(registry.rows[0].path, oldPath)
+  assert.equal(registry.rows[0].path.toLowerCase(), (await realpath(target)).toLowerCase())
+  assert.deepEqual(registry.rows[0].sessionIds.sort(), ['session-a', 'session-b', 'session-c'])
 
   assert.equal(store.findWorkspaceForPath(join(oldPath, 'src', 'a.js')).via, 'home')
   assert.equal(store.findWorkspaceForPath(join(target, 'src', 'a.js')).via, 'relocated')
@@ -438,6 +466,8 @@ test('migrating twice moves from the relocated location and re-points the anchor
   store.setRegistry(registry)
   const created = await store.create('demo')
   registry.rows[0].sessionIds = ['session-a']
+  registry.rows[0].record.sessionIds = ['session-a']
+  registry.sessionPaths.set('session-a', created.workspace.path)
   const first = join(root, 'one', 'demo')
   const second = join(root, 'two', 'demo')
 
