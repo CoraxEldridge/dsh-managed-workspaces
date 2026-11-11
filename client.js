@@ -16,6 +16,7 @@ window.__ModuleLoader__.load({
       subtitle: 'DSH 在指定根目录下创建的工作区，可关联多个文件夹',
       close: '关闭',
       loading: '正在读取工作区状态…',
+      pickerUnavailable: '当前环境不提供目录选择器，请直接输入路径。',
       baseLabel: '工作区根目录',
       baseHint: '新建的工作区会创建为该目录下的一个子文件夹；正在使用的工作区不会被移动。',
       save: '保存',
@@ -88,6 +89,7 @@ window.__ModuleLoader__.load({
       subtitle: 'Workspaces DSH creates under a base directory, with linked folders',
       close: 'Close',
       loading: 'Reading workspace state…',
+      pickerUnavailable: 'This environment provides no directory picker; type the path instead.',
       baseLabel: 'Workspace base directory',
       baseHint: 'New workspaces are created as a subfolder of this directory; existing workspaces are never moved.',
       save: 'Save',
@@ -293,15 +295,33 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function pickFolder() {
-        try {
-          const picker = ctx.get('remote')?.directoryPicker
-          if (picker === undefined || typeof picker.pick !== 'function') return null
+      async function pickDirectory() {
+        const desktop = globalThis.__DSH_DIRECTORY_PICKER__
+        if (desktop !== undefined && desktop !== null && typeof desktop.pick === 'function') {
+          const picked = await desktop.pick()
+          return typeof picked === 'string' && picked !== '' ? picked : null
+        }
+        const workspace = ctx.get('uiWorkspace')
+        if (workspace !== undefined && workspace !== null && typeof workspace.pickDirectory === 'function') {
+          const picked = await workspace.pickDirectory()
+          return typeof picked === 'string' && picked !== '' ? picked : null
+        }
+        const picker = ctx.get('remote')?.directoryPicker
+        if (picker !== undefined && picker !== null && typeof picker.pick === 'function') {
           const result = await picker.pick()
+          if (typeof result === 'string') return result === '' ? null : result
           return result !== null && result !== undefined && result.ok === true && typeof result.value === 'string'
             ? result.value
             : null
-        } catch {
+        }
+        throw new Error(translate('pickerUnavailable'))
+      }
+
+      async function pickFolderOr(reportError) {
+        try {
+          return await pickDirectory()
+        } catch (error) {
+          reportError(messageOf(error))
           return null
         }
       }
@@ -515,7 +535,7 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   disabled: busy !== null,
                   onClick: async () => {
-                    const picked = await pickFolder()
+                    const picked = await pickFolderOr((message) => setSnapshot({ error: message }))
                     if (picked !== null) setBase(picked)
                   },
                 },
@@ -792,7 +812,7 @@ window.__ModuleLoader__.load({
           }
         }
         const browse = async () => {
-          const picked = await pickFolder()
+          const picked = await pickFolderOr((message) => setSnapshot({ error: message }))
           if (picked === null) return
           const name = ws.path.split(/[\\/]/).filter(Boolean).pop() ?? 'workspace'
           const separator = picked.includes('\\') ? '\\' : '/'
@@ -904,7 +924,7 @@ window.__ModuleLoader__.load({
                 type: 'button',
                 className: 'dsh-mws-btn',
                 onClick: async () => {
-                  const picked = await pickFolder()
+                  const picked = await pickFolderOr((message) => setSnapshot({ error: message }))
                   if (picked !== null) setFolder(picked)
                 },
               },
@@ -981,7 +1001,7 @@ window.__ModuleLoader__.load({
         }
         const pickExisting = async () => {
           if (disabled) return
-          const picked = await pickFolder()
+          const picked = await pickFolderOr((message) => props.onError(message))
           if (picked !== null) props.onPicked(picked)
         }
         const adoptCandidate = async (candidate) => {
