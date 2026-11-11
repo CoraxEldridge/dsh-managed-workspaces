@@ -10,6 +10,25 @@ const API_PREFIX = '/dsh-managed-workspaces/api/'
 const GUARD_HEADER = 'x-dsh-managed-workspaces'
 const MAX_BODY_BYTES = 64 * 1024
 
+/**
+ * The composition's connection service owns the Host/Origin fence and browser
+ * authentication. Routes mounted with `webServer.register` sit outside the
+ * `/api` gateway, so they receive neither: the marker header below stops plain
+ * cross-site form posts but not DNS rebinding, where a hostile page becomes
+ * same-origin by rewriting its own host name. Every request therefore asks the
+ * connection service for a rejection before it can reach the store.
+ */
+function connectionOf(ctx) {
+  const connection = ctx?.connection
+  if (connection === undefined || typeof connection.requestRejection !== 'function') {
+    throw new ManagedWorkspaceError(
+      'fence-unavailable',
+      'the connection service is required to serve managed workspace routes safely',
+    )
+  }
+  return connection
+}
+
 function errorPayload(error) {
   if (error instanceof ManagedWorkspaceError) {
     return {
@@ -52,9 +71,20 @@ async function readBody(request) {
   return Buffer.concat(chunks).toString('utf8')
 }
 
-function routeHandler(operation) {
+function routeHandler(operation, connection) {
   return async (request, response) => {
     try {
+      const rejection = connection.requestRejection(request)
+      if (rejection !== undefined) {
+        sendJson(response, rejection, {
+          ok: false,
+          error: {
+            code: rejection === 401 ? 'unauthorized' : 'forbidden',
+            message: 'request rejected by the connection fence',
+          },
+        })
+        return
+      }
       if (request.method !== 'POST') {
         sendJson(response, 405, { ok: false, error: { code: 'method-not-allowed', message: 'POST required' } })
         return
@@ -94,19 +124,20 @@ function routeHandler(operation) {
 
 /**
  * Register every plugin route on the hosting web server.
- * @param {object} ctx - plugin context providing `webServer`.
+ * @param {object} ctx - plugin context providing `webServer` and `connection`.
  * @param {import('./store.js').ManagedWorkspaceStore} store - state owner.
  * @returns {() => void} disposer removing every route.
  */
 export function registerRoutes(ctx, store) {
   const webServer = ctx.webServer
+  const connection = connectionOf(ctx)
   const disposers = []
   const route = (name, operation) => {
     disposers.push(
       webServer.register({
         kind: 'exact',
         path: API_PREFIX + name,
-        handler: routeHandler(operation),
+        handler: routeHandler(operation, connection),
       }),
     )
   }

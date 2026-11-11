@@ -52,6 +52,16 @@ const STATE = {
   candidates: [],
 }
 
+function fakeConnection(rejection) {
+  return {
+    calls: 0,
+    requestRejection() {
+      this.calls += 1
+      return rejection
+    },
+  }
+}
+
 function makeStore(overrides = {}) {
   return {
     async state() {
@@ -79,7 +89,7 @@ async function call(webServer, name, { method = 'POST', guard = true, body = '{}
 
 test('routes answer state and create with a JSON envelope', async () => {
   const webServer = fakeWebServer()
-  const dispose = registerRoutes({ webServer }, makeStore())
+  const dispose = registerRoutes({ webServer, connection: fakeConnection() }, makeStore())
   const state = await call(webServer, 'state')
   assert.equal(state.response.status, 200)
   assert.equal(state.payload.ok, true)
@@ -94,7 +104,7 @@ test('routes answer state and create with a JSON envelope', async () => {
 
 test('routes reject a missing marker, a wrong method, and malformed JSON', async () => {
   const webServer = fakeWebServer()
-  registerRoutes({ webServer }, makeStore())
+  registerRoutes({ webServer, connection: fakeConnection() }, makeStore())
 
   const unmarked = await call(webServer, 'state', { guard: false })
   assert.equal(unmarked.response.status, 403)
@@ -116,7 +126,7 @@ test('routes reject a missing marker, a wrong method, and malformed JSON', async
 test('an oversized body is drained and answered with 413', async () => {
   const webServer = fakeWebServer()
   let reached = false
-  registerRoutes({ webServer }, makeStore({
+  registerRoutes({ webServer, connection: fakeConnection() }, makeStore({
     async create() {
       reached = true
       return {}
@@ -134,7 +144,7 @@ test('an oversized body is drained and answered with 413', async () => {
 
 test('store errors keep their code in the envelope', async () => {
   const webServer = fakeWebServer()
-  registerRoutes({ webServer }, makeStore({
+  registerRoutes({ webServer, connection: fakeConnection() }, makeStore({
     async create() {
       throw new ManagedWorkspaceError('exists', 'workspace folder already exists: D:\\base\\demo')
     },
@@ -144,4 +154,43 @@ test('store errors keep their code in the envelope', async () => {
   assert.equal(result.payload.ok, false)
   assert.equal(result.payload.error.code, 'exists')
   assert.match(result.payload.error.message, /already exists/)
+})
+
+test('the connection fence answers before the marker header and never reaches the store', async () => {
+  const webServer = fakeWebServer()
+  const connection = fakeConnection(401)
+  let reached = false
+  registerRoutes({ webServer, connection }, makeStore({
+    async state() {
+      reached = true
+      return STATE
+    },
+  }))
+  // No marker header: a hostile same-origin page would attach it, which is
+  // exactly why the fence has to run first.
+  const unauthorized = await call(webServer, 'state', { guard: false })
+  assert.equal(unauthorized.response.status, 401)
+  assert.equal(unauthorized.payload.error.code, 'unauthorized')
+  assert.equal(reached, false)
+
+  const forbidden = await (async () => {
+    const server = fakeWebServer()
+    registerRoutes({ webServer: server, connection: fakeConnection(403) }, makeStore())
+    return call(server, 'state')
+  })()
+  assert.equal(forbidden.response.status, 403)
+  assert.equal(forbidden.payload.error.code, 'forbidden')
+
+  assert.ok(connection.calls >= 1)
+})
+
+test('routes refuse to mount when the connection fence is unavailable', () => {
+  assert.throws(
+    () => registerRoutes({ webServer: fakeWebServer() }, makeStore()),
+    (error) => error.code === 'fence-unavailable' && /connection/.test(error.message),
+  )
+  assert.throws(
+    () => registerRoutes({ webServer: fakeWebServer(), connection: {} }, makeStore()),
+    (error) => error.code === 'fence-unavailable',
+  )
 })

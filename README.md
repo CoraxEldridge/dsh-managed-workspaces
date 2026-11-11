@@ -116,7 +116,7 @@ plugin_manager({ action: "install_bundle", target: "D:\\path\\to\\dsh-managed-wo
 - 工作区文件夹被外部删除时不会静默重建，需在界面点「修复」。
 - 若 `_roots/<别名>` 被真实文件或目录占用，插件只报告冲突，绝不覆盖或删除。
 - 卸载插件不会动磁盘上的任何工作区文件夹、链接或会话。
-- 插件的 HTTP 路由只接受带 `x-dsh-managed-workspaces: 1` 请求头的 POST，且只操作插件自身记录与根目录下的文件夹。
+- 插件的 HTTP 路由先向宿主的 `connection` 服务要一次准入（Host/Origin 校验 + 浏览器认证，挡住 DNS 重绑定与跨站调用），再要求带 `x-dsh-managed-workspaces: 1` 请求头的 POST；路由只操作插件自身记录与根目录下的文件夹。
 
 ## 开发
 

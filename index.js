@@ -25,7 +25,7 @@ export function apply(ctx) {
   ctx.effect(() => () => store.dispose(), 'dsh-managed-workspaces: store')
   store.load().catch((error) => warn(`failed to load the managed workspace manifest: ${error?.message ?? error}`))
 
-  ctx.inject(['webServer'], (scope) => {
+  ctx.inject(['webServer', 'connection'], (scope) => {
     scope.effect(() => registerRoutes(scope, store), 'dsh-managed-workspaces: routes')
   })
 
