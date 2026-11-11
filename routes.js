@@ -21,11 +21,12 @@ function errorPayload(error) {
   return { code: 'internal', message: errorMessage(error) }
 }
 
-function sendJson(response, status, payload) {
+function sendJson(response, status, payload, extraHeaders) {
   if (response.writableEnded || response.destroyed) return
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
+    ...(extraHeaders ?? {}),
   })
   response.end(JSON.stringify(payload))
 }
@@ -33,12 +34,20 @@ function sendJson(response, status, payload) {
 async function readBody(request) {
   const chunks = []
   let total = 0
+  let tooLarge = false
   for await (const chunk of request) {
     total += chunk.length
     if (total > MAX_BODY_BYTES) {
-      throw new ManagedWorkspaceError('body-too-large', `request body exceeds ${MAX_BODY_BYTES} bytes`)
+      // Keep draining without buffering: throwing mid-stream destroys the
+      // request socket and the client would never see the 413 response.
+      tooLarge = true
+      chunks.length = 0
+      continue
     }
-    chunks.push(chunk)
+    if (!tooLarge) chunks.push(chunk)
+  }
+  if (tooLarge) {
+    throw new ManagedWorkspaceError('body-too-large', `request body exceeds ${MAX_BODY_BYTES} bytes`)
   }
   return Buffer.concat(chunks).toString('utf8')
 }
@@ -71,8 +80,14 @@ function routeHandler(operation) {
       const result = await operation(args, request)
       sendJson(response, 200, { ok: true, ...(result ?? {}) })
     } catch (error) {
-      const status = error instanceof ManagedWorkspaceError && error.code === 'body-too-large' ? 413 : 200
-      sendJson(response, status, { ok: false, error: errorPayload(error) })
+      const tooLarge = error instanceof ManagedWorkspaceError && error.code === 'body-too-large'
+      const status = tooLarge ? 413 : 200
+      sendJson(
+        response,
+        status,
+        { ok: false, error: errorPayload(error) },
+        tooLarge ? { connection: 'close' } : undefined,
+      )
     }
   }
 }

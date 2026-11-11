@@ -9,6 +9,7 @@ import {
   ManagedWorkspaceStore,
   defaultAlias,
   isUnder,
+  normalizePath,
   uniqueAlias,
   validateSegment,
 } from '../store.js'
@@ -506,4 +507,143 @@ test('adopt refuses the migrated location of an existing workspace', async (t) =
   await store.migrate(created.workspace.id, target)
 
   await expectCode(store.adopt(target), 'already-managed')
+})
+
+test('normalizePath keeps a filesystem root intact', () => {
+  if (process.platform === 'win32') {
+    assert.equal(normalizePath('C:\\'), 'C:\\')
+    assert.equal(normalizePath('C:\\Users\\'), 'C:\\Users')
+    assert.equal(normalizePath('C:/Users//me/'), 'C:\\Users\\me')
+    // A bare drive designator must not make the root look like a child path.
+    assert.equal(isUnder('C:\\Users', 'C:\\'), true)
+    assert.equal(isUnder('C:\\', 'C:\\Users'), false)
+  } else {
+    assert.equal(normalizePath('/'), '/')
+    assert.equal(normalizePath('/tmp//x/'), '/tmp/x')
+  }
+})
+
+test('the manifest keeps a custom links directory name and rejects an unsafe one', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-mws-'))
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'home')
+  const manifestPath = join(home, 'managed-workspaces', 'manifest.json')
+  await mkdir(join(home, 'managed-workspaces'), { recursive: true })
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify({ schemaVersion: 1, baseDirectory: join(root, 'base'), linksDirectoryName: 'links', workspaces: [] })}\n`,
+    'utf8',
+  )
+  const custom = new ManagedWorkspaceStore({ home })
+  await custom.load()
+  assert.equal((await custom.state()).linksDirectoryName, 'links')
+
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify({ schemaVersion: 1, baseDirectory: join(root, 'base'), linksDirectoryName: '..', workspaces: [] })}\n`,
+    'utf8',
+  )
+  const invalid = new ManagedWorkspaceStore({ home })
+  await invalid.load()
+  const state = await invalid.state()
+  assert.equal(state.linksDirectoryName, '_roots')
+  assert.ok(state.warnings.some((warning) => warning.includes('linksDirectoryName')))
+})
+
+test('a failed manifest load is retried instead of poisoning every later call', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-mws-'))
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'home')
+  const manifestPath = join(home, 'managed-workspaces', 'manifest.json')
+  // A directory where the manifest belongs makes readFile fail with EISDIR.
+  await mkdir(manifestPath, { recursive: true })
+  const store = new ManagedWorkspaceStore({ home })
+  await assert.rejects(store.load())
+  await rm(manifestPath, { recursive: true, force: true })
+
+  const state = await store.state()
+  assert.equal(state.workspaces.length, 0)
+  assert.ok(state.baseDirectory.endsWith('DSH-Workspaces'))
+})
+
+test('findWorkspaceForPath prefers the most specific workspace', async (t) => {
+  const { root, store } = await makeStore(t)
+  const outer = await store.create('outer')
+  const innerPath = join(outer.workspace.path, 'inner')
+  await mkdir(innerPath, { recursive: true })
+  const inner = await store.adopt(innerPath)
+
+  assert.equal(store.findWorkspaceForPath(join(innerPath, 'src', 'x.js')).workspace.name, 'inner')
+  assert.equal(store.findWorkspaceForPath(join(outer.workspace.path, 'other', 'y.js')).workspace.name, 'outer')
+
+  // A linked folder that is itself a managed workspace resolves to that workspace.
+  const shared = join(root, 'shared-ws')
+  await mkdir(shared, { recursive: true })
+  const adoptedShared = await store.adopt(shared)
+  await store.attach(outer.workspace.id, shared)
+  assert.equal(store.findWorkspaceForPath(join(shared, 'file.txt')).workspace.name, adoptedShared.workspace.name)
+  assert.equal(store.findWorkspaceForPath(shared).via, 'home')
+})
+
+test('link aliases follow case-insensitive Windows directory rules', async (t) => {
+  if (process.platform !== 'win32') return
+  const { root, store } = await makeStore(t)
+  const workspace = await store.create('demo')
+  const first = join(root, 'TARGET-A')
+  const second = join(root, 'target-b')
+  await mkdir(first, { recursive: true })
+  await mkdir(second, { recursive: true })
+
+  assert.equal(uniqueAlias(['Data'], 'data'), 'data-2')
+  const linked = await store.attach(workspace.workspace.id, first, 'Data')
+  assert.equal(linked.link.alias, 'Data')
+
+  // Reusing the same target with a different spelling is the same link.
+  const again = await store.attach(workspace.workspace.id, first, 'DATA')
+  assert.equal(again.link.alias, 'Data')
+  assert.equal(again.created, false)
+
+  const other = await store.attach(workspace.workspace.id, second, 'data')
+  assert.equal(other.link.alias, 'data-2')
+
+  const detached = await store.detach(workspace.workspace.id, 'DATA')
+  assert.equal(detached.removed, 'Data')
+})
+
+test('migration keeps the session account when the registry exposes no path index', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  delete registry.host
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  registry.rows[0].sessionIds = ['session-a']
+  registry.rows[0].record.sessionIds = ['session-a']
+  const target = join(root, 'elsewhere', 'demo')
+
+  const result = await store.migrate(created.workspace.id, target)
+  assert.equal(result.mode, 'anchor')
+  assert.equal(result.attachedSessions, 1)
+  assert.equal(result.attachErrors.length, 0)
+  assert.equal(registry.rows.length, 1)
+  assert.equal(registry.rows[0].path.toLowerCase(), (await realpath(target)).toLowerCase())
+  assert.ok(registry.rows[0].sessionIds.includes('session-a'))
+})
+
+test('repair reports nothing to fix for a healthy migrated workspace', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  registry.rows[0].sessionIds = ['session-a']
+  registry.rows[0].record.sessionIds = ['session-a']
+  registry.sessionPaths.set('session-a', created.workspace.path)
+  await store.migrate(created.workspace.id, join(root, 'elsewhere', 'demo'))
+
+  const repaired = await store.repair(created.workspace.id)
+  assert.deepEqual(repaired.conflicts, [])
+  assert.deepEqual(repaired.repaired, [])
 })

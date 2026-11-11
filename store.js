@@ -37,11 +37,24 @@ function fail(code, message, details) {
   throw new ManagedWorkspaceError(code, message, details)
 }
 
-/** Normalize one absolute-or-relative spelling into an absolute, separator-stable path. */
+/**
+ * Normalize one absolute-or-relative spelling into an absolute, separator-stable path.
+ * A filesystem root keeps its trailing separator, because `C:` names the current
+ * directory on that drive rather than the drive root.
+ */
 export function normalizePath(value) {
-  let out = resolve(value)
-  while (out.length > 1 && out.endsWith(sep)) out = out.slice(0, -1)
-  return out
+  const out = resolve(value)
+  const root = parse(out).root
+  let trimmed = out
+  while (trimmed.length > root.length && trimmed.endsWith(sep)) trimmed = trimmed.slice(0, -1)
+  return trimmed
+}
+
+/** Number of path segments, used to prefer the most specific workspace for a directory. */
+export function pathDepth(value) {
+  const normalized = normalizePath(value)
+  const root = parse(normalized).root
+  return (root.length > 0 ? 1 : 0) + normalized.slice(root.length).split(sep).filter(Boolean).length
 }
 
 /** Compare two path spellings the way the host filesystem does. */
@@ -87,13 +100,18 @@ export function defaultAlias(target) {
   return cleaned.length > 0 && cleaned !== '.' && cleaned !== '..' && !RESERVED_SEGMENTS.test(cleaned) ? cleaned : 'folder'
 }
 
+/** Compare link aliases with the host's directory-name rules (case-insensitive on Windows). */
+function aliasKey(value) {
+  return IS_WIN ? value.toLowerCase() : value
+}
+
 /** Pick the first alias not already used in the workspace. */
 export function uniqueAlias(used, preferred) {
-  const taken = new Set(used)
-  if (!taken.has(preferred)) return preferred
+  const taken = new Set([...used].map(aliasKey))
+  if (!taken.has(aliasKey(preferred))) return preferred
   for (let index = 2; index < 1000; index += 1) {
     const candidate = `${preferred}-${index}`
-    if (!taken.has(candidate)) return candidate
+    if (!taken.has(aliasKey(candidate))) return candidate
   }
   return `${preferred}-${randomUUID().slice(0, 8)}`
 }
@@ -226,14 +244,28 @@ async function moveDirectory(source, destination) {
   } catch (error) {
     if (error.code !== 'EXDEV') throw error
   }
-  await cp(source, destination, {
-    recursive: true,
-    errorOnExist: true,
-    force: false,
-    preserveTimestamps: true,
-  })
-  const left = await treeSummary(source)
-  const right = await treeSummary(destination)
+  try {
+    await cp(source, destination, {
+      recursive: true,
+      errorOnExist: true,
+      force: false,
+      preserveTimestamps: true,
+    })
+  } catch (error) {
+    // A copy can fail partway; never leave a half-populated destination behind,
+    // because the next attempt would only see an existing path.
+    await rm(destination, { recursive: true, force: true }).catch(() => {})
+    throw error
+  }
+  let left
+  let right
+  try {
+    left = await treeSummary(source)
+    right = await treeSummary(destination)
+  } catch (error) {
+    await rm(destination, { recursive: true, force: true }).catch(() => {})
+    throw error
+  }
   const matches =
     left.files === right.files &&
     left.directories === right.directories &&
@@ -269,6 +301,13 @@ function normalizeManifest(raw, warnings) {
     const expanded = expandHomePath(raw.baseDirectory.trim())
     if (isAbsolute(expanded)) manifest.baseDirectory = normalizePath(expanded)
     else warnings.push(`ignored a non-absolute baseDirectory: ${JSON.stringify(raw.baseDirectory)}`)
+  }
+  if (raw.linksDirectoryName !== undefined) {
+    try {
+      manifest.linksDirectoryName = validateSegment(raw.linksDirectoryName, 'linksDirectoryName')
+    } catch (error) {
+      warnings.push(`ignored linksDirectoryName: ${errorMessage(error)}`)
+    }
   }
   if (Array.isArray(raw.workspaces)) {
     for (const entry of raw.workspaces) {
@@ -340,9 +379,18 @@ export class ManagedWorkspaceStore {
     this.registry = null
   }
 
-  /** Load the manifest once. Repeated calls share the same promise. */
+  /**
+   * Load the manifest once per successful attempt. A failed attempt (for
+   * example a transient permission or handle error) clears the cached promise
+   * so the next caller retries instead of inheriting the failure forever.
+   */
   load() {
-    if (this.loadPromise === null) this.loadPromise = this.loadOnce()
+    if (this.loadPromise === null) {
+      this.loadPromise = this.loadOnce().catch((error) => {
+        this.loadPromise = null
+        throw error
+      })
+    }
     return this.loadPromise
   }
 
@@ -450,14 +498,23 @@ export class ManagedWorkspaceStore {
     return [...ids]
   }
 
-  /** How many sessions belong to this workspace at its physical location. */
+  /**
+   * How many sessions belong to this workspace at its physical location.
+   *
+   * The index of live session directories is the primary source because it
+   * follows `realpath`, but the record's own account is included as well: a
+   * session whose recorded directory no longer resolves keeps its slot, and a
+   * migration must never mistake that workspace for an empty one.
+   */
   sessionCountOf(record) {
     const canonical = typeof record.relocatedTo === 'string' ? record.relocatedTo : record.path
-    const found = this.sessionIdsAt(canonical)
-    if (found.length > 0) return found.length
+    const ids = new Set(this.sessionIdsAt(canonical))
     const entity = this.registryEntity(record)
-    const ids = entity?.sessionIds
-    return Array.isArray(ids) ? ids.length : 0
+    for (const source of [entity?.record?.sessionIds, entity?.sessionIds]) {
+      if (!Array.isArray(source)) continue
+      for (const id of source) ids.add(String(id))
+    }
+    return ids.size
   }
 
   /** The physical directory holding the workspace content (anchor resolved). */
@@ -517,21 +574,37 @@ export class ManagedWorkspaceStore {
     return out
   }
 
-  /** Resolve the managed workspace that owns an absolute path. */
+  /**
+   * Resolve the managed workspace that owns an absolute path.
+   *
+   * Specificity wins: an exact match, then the deepest matching root or linked
+   * target. Registration order only breaks a tie, so a workspace adopted inside
+   * another one (or a linked folder that is itself a workspace) resolves to the
+   * workspace the session really belongs to.
+   */
   findWorkspaceForPath(path) {
     if (this.manifest === null || typeof path !== 'string') return null
+    let best = null
+    const consider = (workspace, via, root, alias, link) => {
+      if (!isUnder(path, root)) return
+      const depth = pathDepth(root)
+      if (best === null || depth > best.depth) best = { workspace, via, depth, alias, link }
+    }
     for (const workspace of this.manifest.workspaces) {
-      if (isUnder(path, workspace.path)) return { workspace, via: 'home' }
-      if (typeof workspace.relocatedTo === 'string' && isUnder(path, workspace.relocatedTo)) {
-        return { workspace, via: 'relocated' }
+      consider(workspace, 'home', workspace.path, undefined, undefined)
+      if (typeof workspace.relocatedTo === 'string') {
+        consider(workspace, 'relocated', workspace.relocatedTo, undefined, undefined)
       }
     }
     for (const workspace of this.manifest.workspaces) {
       for (const link of workspace.links) {
-        if (isUnder(path, link.target)) return { workspace, via: 'link', alias: link.alias, link }
+        consider(workspace, 'link', link.target, link.alias, link)
       }
     }
-    return null
+    if (best === null) return null
+    return best.alias === undefined
+      ? { workspace: best.workspace, via: best.via }
+      : { workspace: best.workspace, via: best.via, alias: best.alias, link: best.link }
   }
 
   async linkView(record, link) {
@@ -758,25 +831,29 @@ export class ManagedWorkspaceStore {
     return detached
   }
 
-  /** Point the stable anchor path at the migrated directory, replacing a stale link. */
+  /**
+   * Point the stable anchor path at the migrated directory, replacing a stale link.
+   * @returns `'created'` or `'replaced'` when the node changed, `'unchanged'` otherwise.
+   */
   async ensureAnchorLink(record, destination, previous) {
     const anchor = record.path
     const node = await lstatOrNull(anchor)
     if (node === null) {
       await mkdir(dirname(anchor), { recursive: true })
       await createDirectoryLink(destination, anchor)
-      return
+      return 'created'
     }
     if (!node.isSymbolicLink()) {
       fail('conflict', `refusing to replace "${anchor}": it is a real directory or file`)
     }
     const actual = await resolveLink(anchor)
-    if (samePath(actual, destination)) return
+    if (samePath(actual, destination)) return 'unchanged'
     if (!samePath(actual, previous) && !isUnder(actual, previous)) {
       fail('conflict', `refusing to replace "${anchor}": it points to ${actual}`)
     }
     await unlink(anchor)
     await createDirectoryLink(destination, anchor)
+    return 'replaced'
   }
 
   /**
@@ -796,7 +873,7 @@ export class ManagedWorkspaceStore {
    * once that path becomes a link.
    */
   async syncRegistration(record, target, previous) {
-    if (this.registry === null) return { attached: [], errors: [] }
+    if (this.registry === null) return { attached: [], errors: [], repointed: false }
     let entity = this.registryEntity(record)
     if (entity === null && typeof previous === 'string') {
       entity = this.registry.list().find((workspace) => samePath(workspace.path, previous)) ?? null
@@ -809,52 +886,52 @@ export class ManagedWorkspaceStore {
     if (typeof previous === 'string') {
       for (const id of this.sessionIdsAt(previous)) candidates.add(id)
     }
-    const raw = Array.isArray(entity.record?.sessionIds)
-      ? entity.record.sessionIds
-      : Array.isArray(entity.sessionIds)
-        ? entity.sessionIds
-        : []
-    for (const id of raw) candidates.add(id)
-    if (Array.isArray(entity.sessionIds)) {
-      for (const id of entity.sessionIds) candidates.add(id)
+    const accountOf = (workspace) => {
+      const ids = new Set()
+      for (const source of [workspace.record?.sessionIds, workspace.sessionIds]) {
+        if (!Array.isArray(source)) continue
+        for (const id of source) ids.add(String(id))
+      }
+      return [...ids]
     }
+    for (const id of accountOf(entity)) candidates.add(id)
 
+    let repointed = false
     if (!samePath(entity.path, target)) {
       // Teach the registry the new canonical path before the record moves, so
       // its candidate pruning keeps the sessions instead of dropping them.
       const remember = this.registry?.host?.rememberSessionPath
-      if (typeof remember === 'function') {
+      if (typeof remember === 'function' && typeof entity.mutate === 'function') {
         for (const id of candidates) remember(id, target)
-      }
-      if (typeof entity.mutate === 'function') {
         await entity.mutate((current) => ({ ...current, path: target }))
+        repointed = true
       } else {
+        // Without the path index a move would prune every account, so drop the
+        // registration and rebuild it at the physical location instead.
         await this.registry.delete(String(entity.id))
         entity = await this.registry.create(target, record.name)
+        repointed = true
       }
     }
 
     const attached = []
     const errors = []
-    const current = Array.isArray(entity.record?.sessionIds)
-      ? entity.record.sessionIds
-      : Array.isArray(entity.sessionIds)
-        ? entity.sessionIds
-        : []
+    const account = new Set(accountOf(entity))
     for (const id of candidates) {
-      if (current.includes(id)) continue
+      if (account.has(id)) continue
       if (typeof entity.attachSession !== 'function') {
         errors.push(`${id}: the registry cannot attach sessions`)
         continue
       }
       try {
         await entity.attachSession(id)
+        account.add(id)
         attached.push(id)
       } catch (error) {
         errors.push(`${id}: ${errorMessage(error)}`)
       }
     }
-    return { attached, errors }
+    return { attached, errors, repointed }
   }
 
   async migrate(id, destination, options = {}) {
@@ -1023,7 +1100,7 @@ export class ManagedWorkspaceStore {
       const existing = record.links.find((link) => samePath(link.target, target))
       if (existing !== undefined) {
         const requested = typeof alias === 'string' && alias.trim().length > 0 ? validateSegment(alias, 'alias') : existing.alias
-        if (requested !== existing.alias) {
+        if (aliasKey(requested) !== aliasKey(existing.alias)) {
           fail('already-linked', `folder is already linked as "${existing.alias}"`, { alias: existing.alias })
         }
         return { workspace: await this.view(record), link: await this.linkView(record, existing), created: false }
@@ -1057,10 +1134,10 @@ export class ManagedWorkspaceStore {
     return this.run(async () => {
       const record = this.mustFind(id)
       const name = validateSegment(alias, 'alias')
-      const index = record.links.findIndex((link) => link.alias === name)
+      const index = record.links.findIndex((link) => aliasKey(link.alias) === aliasKey(name))
       if (index < 0) fail('not-found', `workspace "${record.name}" has no link named "${name}"`)
       const link = record.links[index]
-      const linkPath = join(this.linksDirectory(record), name)
+      const linkPath = join(this.linksDirectory(record), link.alias)
       const node = await lstatOrNull(linkPath)
       if (node !== null) {
         if (!node.isSymbolicLink()) {
@@ -1074,7 +1151,7 @@ export class ManagedWorkspaceStore {
       }
       record.links.splice(index, 1)
       await this.persist()
-      return { workspace: await this.view(record), removed: name }
+      return { workspace: await this.view(record), removed: link.alias }
     })
   }
 
@@ -1127,19 +1204,18 @@ export class ManagedWorkspaceStore {
         }
         // The original path is the anchor every recorded session still uses.
         try {
-          await this.ensureAnchorLink(record, relocated, relocated)
-          if (!(await isDirectory(record.path))) {
+          const anchor = await this.ensureAnchorLink(record, relocated, relocated)
+          if (anchor !== 'unchanged') repaired.push('anchor')
+          if (!(await isDirectory(record.path)) || !samePath(await this.realPathOf(record), relocated)) {
             conflicts.push(`anchor ${record.path} does not resolve to ${relocated}`)
-          } else if (await samePath(await this.realPathOf(record), relocated)) {
-            if (repaired.length === 0) repaired.push('anchor')
           }
         } catch (error) {
           conflicts.push(`anchor: ${errorMessage(error)}`)
         }
         try {
-          const attach = await this.syncRegistration(record, relocated)
-          if (repaired.length === 0) repaired.push('registration')
-          if (attach.errors.length > 0) conflicts.push(...attach.errors)
+          const sync = await this.syncRegistration(record, relocated)
+          if (sync.repointed || sync.attached.length > 0) repaired.push('registration')
+          if (sync.errors.length > 0) conflicts.push(...sync.errors)
         } catch (error) {
           conflicts.push(`registration: ${errorMessage(error)}`)
         }

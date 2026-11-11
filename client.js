@@ -295,6 +295,15 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * Run a context-menu action. The menu closes immediately, so a failure has
+       * nowhere to show unless the panel is opened; keep the error visible there.
+       */
+      async function mutateFromMenu(action, payload, focusId) {
+        const ok = await mutate(action, payload)
+        if (!ok) setSnapshot({ open: true, focusId: focusId ?? null, focusMode: null })
+      }
+
       async function pickDirectory() {
         const desktop = globalThis.__DSH_DIRECTORY_PICKER__
         if (desktop !== undefined && desktop !== null && typeof desktop.pick === 'function') {
@@ -348,7 +357,9 @@ window.__ModuleLoader__.load({
 
       function openPanel(focusId, focusMode) {
         setSnapshot({ open: true, focusId: focusId ?? null, focusMode: focusMode ?? null })
-        if (snapshot.data === null && snapshot.loading === false) refresh()
+        // Always re-read: other windows, the model-facing tool, and the sidebar
+        // add-workspace flow all change this state without touching the panel.
+        refresh()
       }
 
       function closePanel() {
@@ -374,7 +385,7 @@ window.__ModuleLoader__.load({
                       label: translate('menu.adopt'),
                       separatorBefore: true,
                       run: () => {
-                        mutate('adopt', { folder: path })
+                        mutateFromMenu('adopt', { folder: path }, null)
                       },
                     },
                   ]
@@ -401,7 +412,7 @@ window.__ModuleLoader__.load({
                     id: 'managed-repair',
                     label: translate('menu.repair'),
                     run: () => {
-                      mutate('repair', { id: managed.id })
+                      mutateFromMenu('repair', { id: managed.id }, managed.id)
                     },
                   },
                   {
@@ -411,7 +422,7 @@ window.__ModuleLoader__.load({
                     run: () => {
                       const template = adopted ? translate('forgetAdoptedConfirm') : translate('forgetConfirm')
                       if (window.confirm(template.replace('{name}', managed.name))) {
-                        mutate('forget', { id: managed.id })
+                        mutateFromMenu('forget', { id: managed.id }, managed.id)
                       }
                     },
                   },
@@ -435,7 +446,7 @@ window.__ModuleLoader__.load({
           return () => window.removeEventListener('keydown', onKey, true)
         }, [state.open])
         React.useEffect(() => {
-          if (state.open && snapshot.data === null && snapshot.loading === false) refresh()
+          if (state.open && snapshot.data === null && snapshot.loading === false && snapshot.error === null) refresh()
           if (state.open && dialogRef.current !== null) {
             try {
               dialogRef.current.focus()
@@ -978,7 +989,7 @@ window.__ModuleLoader__.load({
             setName('')
             return
           }
-          if (snapshot.data === null && snapshot.loading === false) refresh()
+          if (snapshot.data === null && snapshot.loading === false && snapshot.error === null) refresh()
         }, [open])
         if (!open) return null
         const disabled = busy || working
@@ -990,6 +1001,7 @@ window.__ModuleLoader__.load({
           setWorking(true)
           try {
             const body = await call('create', { name: value })
+            await refresh()
             setName('')
             setShowCreate(false)
             props.onPicked(body.workspace.path)

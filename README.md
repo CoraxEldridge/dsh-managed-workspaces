@@ -77,7 +77,7 @@ plugin_manager({ action: "install_bundle", target: "D:\\path\\to\\dsh-managed-wo
 
 `anchor` 模式需要保留原位置的那一个链接；如果原磁盘将被移除，请先确认该路径可以长期保留（链接本身只占极小空间）。手动指定 `mode: "clean"` 时，若工作区仍有会话会被拒绝。
 
-迁移后界面会显示「实际位置」。若链接被误删，点「修复」即可重建；如果升级前迁移过的工作区出现了「会话未分组」，「修复」也会把注册表改指向新位置并重新挂回会话。
+迁移后界面会显示「实际位置」。若链接被误删，点「修复」（或让模型调用 `managed_workspace({ action: "repair", workspace: "名称" })`）即可重建；如果升级前迁移过的工作区出现了「会话未分组」，「修复」也会把注册表改指向新位置并重新挂回会话。迁移时若有会话没能重新挂回，工具的返回里会列出 `Session warnings`，修好对应路径后再执行一次 `repair` 即可。
 
 ## 使用
 
@@ -97,9 +97,10 @@ plugin_manager({ action: "install_bundle", target: "D:\\path\\to\\dsh-managed-wo
 | `attach` | 关联文件夹（`folder`，可选 `alias`、`workspace`） |
 | `detach` | 解除关联（`alias`） |
 | `register` | 重新注册到侧边栏 |
+| `repair` | 修复：重建工作区目录、迁移链接、关联文件夹，并把会话重新挂回（`workspace`） |
 | `forget` | 移出插件（不删文件；接入的工作区保留侧边栏注册） |
 
-未指定 `workspace` 时，工具使用当前会话所在的工作区。
+未指定 `workspace` 时，工具使用当前会话所在的工作区；工作区嵌套（接入的工作区位于另一个工作区里）时取**最内层**那个。
 
 ## 状态文件
 

@@ -5,7 +5,52 @@
 
 import { ManagedWorkspaceError } from './store.js'
 
-const ACTIONS = ['status', 'list', 'create', 'adopt', 'attach', 'detach', 'migrate', 'register', 'forget']
+const ACTIONS = ['status', 'list', 'create', 'adopt', 'attach', 'detach', 'migrate', 'register', 'repair', 'forget']
+
+const PARAMETER_TYPES = {
+  action: 'string',
+  name: 'string',
+  folder: 'string',
+  all: 'boolean',
+  destination: 'string',
+  mode: 'string',
+  alias: 'string',
+  workspace: 'string',
+}
+
+/**
+ * Validate the model-supplied arguments against the declared schema.
+ *
+ * The tool registers a raw definition (this package has no dependency on the
+ * host tool runtime), so the registry never validates arguments for it. Doing
+ * it here keeps the advertised schema authoritative and turns a typo into a
+ * precise error instead of a confusing store failure.
+ */
+export function validateToolArgs(args) {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) {
+    throw new ManagedWorkspaceError('invalid-arguments', 'arguments must be a JSON object')
+  }
+  for (const [key, value] of Object.entries(args)) {
+    const type = PARAMETER_TYPES[key]
+    if (type === undefined) {
+      throw new ManagedWorkspaceError('invalid-arguments', `unknown argument: ${JSON.stringify(key)}`)
+    }
+    if (value === undefined) continue
+    if (typeof value !== type) {
+      throw new ManagedWorkspaceError('invalid-arguments', `argument ${JSON.stringify(key)} must be a ${type}`)
+    }
+  }
+  if (typeof args.action !== 'string') {
+    throw new ManagedWorkspaceError('invalid-arguments', 'argument "action" is required and must be a string')
+  }
+  if (!ACTIONS.includes(args.action)) {
+    throw new ManagedWorkspaceError('invalid-action', `unknown action: ${JSON.stringify(args.action)}`)
+  }
+  if (args.mode !== undefined && !['auto', 'anchor', 'clean'].includes(args.mode)) {
+    throw new ManagedWorkspaceError('invalid-mode', `unknown migration mode: ${JSON.stringify(args.mode)}`)
+  }
+  return args
+}
 
 const PARAMETERS = {
   type: 'object',
@@ -14,7 +59,7 @@ const PARAMETERS = {
     action: {
       type: 'string',
       enum: ACTIONS,
-      description: 'status reads the current session workspace; list reads every managed workspace and the existing workspaces that are not managed yet; create makes a new workspace folder; adopt registers an existing folder (or every existing sidebar workspace) without moving it; attach/detach add or remove one linked folder; migrate moves the workspace directory while keeping its conversations usable; register re-registers a workspace in the sidebar; forget removes the plugin record without deleting any folder.',
+      description: 'status reads the current session workspace; list reads every managed workspace and the existing workspaces that are not managed yet; create makes a new workspace folder; adopt registers an existing folder (or every existing sidebar workspace) without moving it; attach/detach add or remove one linked folder; migrate moves the workspace directory while keeping its conversations usable; register re-registers a workspace in the sidebar; repair recreates the workspace folder, the migration link, and the linked folders, and re-attaches the sessions; forget removes the plugin record without deleting any folder.',
     },
     name: {
       type: 'string',
@@ -39,7 +84,7 @@ const PARAMETERS = {
     },
     alias: {
       type: 'string',
-      description: 'Link name under the workspace _roots directory. Defaults to the folder name; ignored for detach when omitted.',
+      description: 'Link name under the workspace _roots directory. Defaults to the folder name for action=attach; required for action=detach.',
     },
     workspace: {
       type: 'string',
@@ -145,7 +190,7 @@ export function createManagedWorkspaceTool(ctx, store) {
     description: [
       'Manage DSH workspaces: folders the harness creates under a configured base directory, each of which can own several linked folders, plus existing folders adopted into the same management.',
       'A linked folder appears inside the workspace as _roots/<alias> and its absolute path stays valid.',
-      'status reports the workspace of the current session; list reports managed workspaces and the existing sidebar workspaces that are not managed yet; create makes a workspace folder and registers it in the sidebar; adopt registers an existing folder (or every existing sidebar workspace with all=true) without moving or creating anything; attach/detach add or remove a linked folder; register restores a sidebar registration; forget removes only the plugin record and never deletes files.',
+      'status reports the workspace of the current session; list reports managed workspaces and the existing sidebar workspaces that are not managed yet; create makes a workspace folder and registers it in the sidebar; adopt registers an existing folder (or every existing sidebar workspace with all=true) without moving or creating anything; attach/detach add or remove a linked folder; register restores a sidebar registration; repair recreates a missing folder, link, or session attachment; forget removes only the plugin record and never deletes files.',
     ].join(' '),
     parameters: PARAMETERS,
     output: {
@@ -155,10 +200,8 @@ export function createManagedWorkspaceTool(ctx, store) {
       },
     },
     async execute(args, exec) {
+      validateToolArgs(args)
       const action = args.action
-      if (!ACTIONS.includes(action)) {
-        throw new ManagedWorkspaceError('invalid-action', `unknown action: ${JSON.stringify(action)}`)
-      }
       await store.load()
 
       if (action === 'list') {
@@ -219,15 +262,39 @@ export function createManagedWorkspaceTool(ctx, store) {
           throw new ManagedWorkspaceError('invalid-target', 'action=migrate requires "destination"')
         }
         const result = await store.migrate(record.id, args.destination, { mode: args.mode })
+        const attachErrors = Array.isArray(result.attachErrors) ? result.attachErrors : []
+        const attached = result.attachedSessions ?? 0
         const explanation =
           result.mode === 'anchor'
-            ? `The original path is kept as a directory link to the new location, so the ${result.sessionCount} recorded session(s) and their conversations keep working.`
+            ? attachErrors.length === 0
+              ? `The original path is kept as a directory link to the new location, so the ${result.sessionCount} recorded session(s) and their conversations keep working.`
+              : `The original path is kept as a directory link to the new location, but only ${attached} of the ${result.sessionCount} recorded session(s) could be re-attached. Fix the warnings below and run action=repair to finish.`
             : 'The workspace had no sessions, so it was re-registered at the new path with no link left behind.'
         const linkNote =
           result.linkErrors.length === 0 ? '' : `\nLink warnings: ${result.linkErrors.join('; ')}`
+        const attachNote =
+          attachErrors.length === 0
+            ? ''
+            : `\nSession warnings:\n${attachErrors.map((entry) => `  - ${entry}`).join('\n')}`
         return {
-          summary: `Moved the workspace content from ${result.source} to ${result.destination} (${result.movedBy}).\n${explanation}${linkNote}\n${workspaceBlock(result.workspace)}`,
+          summary: `Moved the workspace content from ${result.source} to ${result.destination} (${result.movedBy}).\n${explanation}${linkNote}${attachNote}\n${workspaceBlock(result.workspace)}`,
         }
+      }
+
+      if (action === 'repair') {
+        const record = resolveTarget(args, exec)
+        const result = await store.repair(record.id)
+        const lines = [`Repaired workspace "${record.name}".`]
+        lines.push(
+          result.repaired.length === 0
+            ? 'Nothing needed repair.'
+            : `Repaired: ${result.repaired.join(', ')}.`,
+        )
+        if (result.conflicts.length > 0) {
+          lines.push(`Conflicts:\n${result.conflicts.map((entry) => `  - ${entry}`).join('\n')}`)
+        }
+        lines.push(workspaceBlock(result.workspace))
+        return { summary: lines.join('\n') }
       }
 
       if (action === 'register') {
