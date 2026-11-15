@@ -1143,19 +1143,29 @@ window.__ModuleLoader__.load({
         ),
       )
 
-      // A single-slot hole resolves to the lowest `priority` occupant, so this
-      // registration deterministically takes over the sidebar add-workspace flow.
-      ctx.slots.inject('sidebar.workspaces.directoryFlow', () =>
-        ctx.slots.register(
-          {
-            name: 'sidebar.workspaces.directoryFlow',
-            id: 'dsh-managed-workspaces-flow',
-            priority: -1,
-            locale: NS,
-          },
-          ManagedDirectoryFlow,
-        ),
-      )
+      // Every add-workspace surface runs one of these three single-slot holes:
+      // the sidebar "+" button, the blank-session hero picker, and the reusable
+      // `workspace.picker` factory other plugins embed. A single slot resolves
+      // to the lowest `priority`, so these registrations deterministically take
+      // over all three instead of only the sidebar.
+      const flowSlots = [
+        'conversation.hero.workspace.directoryFlow',
+        'sidebar.workspaces.directoryFlow',
+        'workspace.picker.directoryFlow',
+      ]
+      for (const slot of flowSlots) {
+        ctx.slots.inject(slot, () =>
+          ctx.slots.register(
+            {
+              name: slot,
+              id: `dsh-managed-workspaces-flow:${slot}`,
+              priority: -1,
+              locale: NS,
+            },
+            ManagedDirectoryFlow,
+          ),
+        )
+      }
 
       return () => {
         listeners.clear()
