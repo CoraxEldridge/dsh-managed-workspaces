@@ -150,6 +150,17 @@ async function isDirectory(path) {
   return info !== null && info.isDirectory()
 }
 
+/**
+ * `mkdir -p` that tolerates an existing directory. Windows rejects
+ * `mkdir('F:\\', { recursive: true })` with EPERM even though the drive root
+ * exists, so a workspace whose parent is a drive root (`F:\Mypage`) could not
+ * get an anchor link during a migration.
+ */
+export async function ensureDirectory(directory) {
+  if (await isDirectory(directory)) return
+  await mkdir(directory, { recursive: true })
+}
+
 async function exists(path) {
   return (await lstatOrNull(path)) !== null
 }
@@ -664,7 +675,7 @@ export class ManagedWorkspaceStore {
   async ensureBase() {
     const manifest = this.requireManifest()
     const base = manifest.baseDirectory
-    await mkdir(base, { recursive: true })
+    await ensureDirectory(base)
     return base
   }
 
@@ -839,7 +850,7 @@ export class ManagedWorkspaceStore {
     const anchor = record.path
     const node = await lstatOrNull(anchor)
     if (node === null) {
-      await mkdir(dirname(anchor), { recursive: true })
+      await ensureDirectory(dirname(anchor))
       await createDirectoryLink(destination, anchor)
       return 'created'
     }
@@ -1002,7 +1013,7 @@ export class ManagedWorkspaceStore {
 
       let movedBy
       try {
-        await mkdir(dirname(target), { recursive: true })
+        await ensureDirectory(dirname(target))
         movedBy = await moveDirectory(source, target)
       } catch (error) {
         const errors = await this.restoreLinks(detached, source)

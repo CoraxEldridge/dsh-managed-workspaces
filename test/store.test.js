@@ -8,6 +8,7 @@ import {
   ManagedWorkspaceError,
   ManagedWorkspaceStore,
   defaultAlias,
+  ensureDirectory,
   isUnder,
   normalizePath,
   uniqueAlias,
@@ -646,4 +647,16 @@ test('repair reports nothing to fix for a healthy migrated workspace', async (t)
   const repaired = await store.repair(created.workspace.id)
   assert.deepEqual(repaired.conflicts, [])
   assert.deepEqual(repaired.repaired, [])
+})
+
+test('ensureDirectory leaves an existing directory and a drive root alone', async (t) => {
+  const { root } = await makeStore(t)
+  await ensureDirectory(root)
+  await ensureDirectory(join(root, 'nested', 'deeper'))
+  assert.equal((await lstat(join(root, 'nested', 'deeper'))).isDirectory(), true)
+  if (process.platform === 'win32') {
+    // mkdir('C:\\', { recursive: true }) rejects with EPERM; an anchor link
+    // whose parent is a drive root must not fail the migration.
+    await assert.doesNotReject(ensureDirectory('C:\\'))
+  }
 })
