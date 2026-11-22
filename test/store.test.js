@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -659,4 +659,55 @@ test('ensureDirectory leaves an existing directory and a drive root alone', asyn
     // whose parent is a drive root must not fail the migration.
     await assert.doesNotReject(ensureDirectory('C:\\'))
   }
+})
+
+test('a deleted anchor link is restored when the manifest loads', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  const oldPath = created.workspace.path
+  registry.rows[0].sessionIds = ['session-a']
+  registry.rows[0].record.sessionIds = ['session-a']
+  registry.sessionPaths.set('session-a', oldPath)
+  const target = join(root, 'moved', 'demo')
+  await store.migrate(created.workspace.id, target)
+
+  // Deleting the link strands every recorded session: their immutable cwd is
+  // the old path, so open-in-app and the sidebar grouping both stop resolving.
+  await unlink(oldPath)
+  await assert.rejects(lstat(oldPath))
+
+  const reopened = new ManagedWorkspaceStore({
+    home: join(root, 'home'),
+    now: () => '2026-01-01T00:00:00.000Z',
+  })
+  await reopened.load()
+  const anchor = await lstat(oldPath)
+  assert.equal(anchor.isSymbolicLink(), true)
+  assert.equal((await realpath(oldPath)).toLowerCase(), (await realpath(target)).toLowerCase())
+  assert.ok(reopened.warnings.some((warning) => warning.includes('restored the original path link')))
+})
+
+test('a missing anchor is left alone when the content location is gone too', async (t) => {
+  const { root, store } = await makeStore(t)
+  const registry = fakeRegistry([])
+  store.setRegistry(registry)
+  const created = await store.create('demo')
+  const oldPath = created.workspace.path
+  registry.rows[0].sessionIds = ['session-a']
+  registry.rows[0].record.sessionIds = ['session-a']
+  registry.sessionPaths.set('session-a', oldPath)
+  const target = join(root, 'moved', 'demo')
+  await store.migrate(created.workspace.id, target)
+  await unlink(oldPath)
+  await rm(target, { recursive: true, force: true })
+
+  const reopened = new ManagedWorkspaceStore({
+    home: join(root, 'home'),
+    now: () => '2026-01-01T00:00:00.000Z',
+  })
+  await reopened.load()
+  await assert.rejects(lstat(oldPath))
+  assert.ok(reopened.warnings.some((warning) => warning.includes('does not exist either')))
 })

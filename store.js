@@ -437,7 +437,35 @@ export class ManagedWorkspaceStore {
       )
       this.manifest = freshManifest()
     }
+    await this.healAnchors()
     return this.manifest
+  }
+
+  /**
+   * Recreate a migrated workspace's original path when its directory link was
+   * deleted. Sessions record their working directory immutably, so without the
+   * link every tool that resolves that recorded path (open-in-app, files, the
+   * sidebar's grouping) fails even though the content is still at the target.
+   */
+  async healAnchors() {
+    for (const record of this.manifest.workspaces) {
+      if (typeof record.relocatedTo !== 'string') continue
+      try {
+        const node = await lstatOrNull(record.path)
+        if (node !== null) continue
+        if (!(await isDirectory(record.relocatedTo))) {
+          this.warnings.push(
+            `the original path of "${record.name}" is missing and its content location does not exist either: ${record.relocatedTo}`,
+          )
+          continue
+        }
+        await ensureDirectory(dirname(record.path))
+        await createDirectoryLink(record.relocatedTo, record.path)
+        this.warnings.push(`restored the original path link of "${record.name}": ${record.path} -> ${record.relocatedTo}`)
+      } catch (error) {
+        this.warnings.push(`could not restore the original path link of "${record.name}": ${errorMessage(error)}`)
+      }
+    }
   }
 
   /** Run one mutation after the previous one settled. */
@@ -863,7 +891,18 @@ export class ManagedWorkspaceStore {
       fail('conflict', `refusing to replace "${anchor}": it points to ${actual}`)
     }
     await unlink(anchor)
-    await createDirectoryLink(destination, anchor)
+    try {
+      await createDirectoryLink(destination, anchor)
+    } catch (error) {
+      // Never leave the recorded sessions without an anchor: put the previous
+      // link back before reporting the failure.
+      try {
+        await createDirectoryLink(actual, anchor)
+      } catch {
+        // The caller gets the original error; `healAnchors` retries on load.
+      }
+      throw error
+    }
     return 'replaced'
   }
 
