@@ -25,7 +25,10 @@ export function apply(ctx) {
   ctx.effect(() => () => store.dispose(), 'dsh-managed-workspaces: store')
   store.load().catch((error) => warn(`failed to load the managed workspace manifest: ${error?.message ?? error}`))
 
-  ctx.inject(['webServer', 'connection'], (scope) => {
+  // `connection` is read optionally rather than injected: on current hosts the
+  // WebServer admits and authenticates every route itself, so a deployment that
+  // drops or renames that service must not stop the panel from mounting.
+  ctx.inject(['webServer'], (scope) => {
     scope.effect(() => registerRoutes(scope, store), 'dsh-managed-workspaces: routes')
   })
 

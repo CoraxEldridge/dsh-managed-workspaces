@@ -6,11 +6,17 @@ import { registerRoutes } from '../routes.js'
 
 function fakeWebServer() {
   const routes = new Map()
+  const options = new Map()
   return {
     routes,
+    options,
     register(route) {
       routes.set(route.path, route.handler)
-      return () => routes.delete(route.path)
+      options.set(route.path, route)
+      return () => {
+        routes.delete(route.path)
+        options.delete(route.path)
+      }
     },
   }
 }
@@ -74,7 +80,15 @@ function makeStore(overrides = {}) {
   }
 }
 
-async function call(webServer, name, { method = 'POST', guard = true, body = '{}', chunks } = {}) {
+/** A current-generation context: the WebServer admits and passes the Peer. */
+function peerHost(webServer) {
+  return { webServer, connection: { admit() {}, createPeer() {}, fetch: { register() {} } } }
+}
+
+const OWNER_PEER = { principal: { kind: 'owner' } }
+
+/** `peer: null` means "the WebServer dispatched with no admitted Peer". */
+async function call(webServer, name, { method = 'POST', guard = true, body = '{}', chunks, peer = OWNER_PEER } = {}) {
   const handler = webServer.routes.get(`/dsh-managed-workspaces/api/${name}`)
   assert.ok(handler, `route "${name}" is registered`)
   const request = fakeRequest({
@@ -83,13 +97,13 @@ async function call(webServer, name, { method = 'POST', guard = true, body = '{}
     chunks: chunks ?? (body === null ? [] : [body]),
   })
   const response = fakeResponse()
-  await handler(request, response)
+  await handler(request, response, peer === null ? undefined : peer)
   return { response, payload: response.body === '' ? null : JSON.parse(response.body) }
 }
 
 test('routes answer state and create with a JSON envelope', async () => {
   const webServer = fakeWebServer()
-  const dispose = registerRoutes({ webServer, connection: fakeConnection() }, makeStore())
+  const dispose = registerRoutes(peerHost(webServer), makeStore())
   const state = await call(webServer, 'state')
   assert.equal(state.response.status, 200)
   assert.equal(state.payload.ok, true)
@@ -102,9 +116,19 @@ test('routes answer state and create with a JSON envelope', async () => {
   assert.equal(webServer.routes.size, 0)
 })
 
+test('every route declares the required authentication rule', () => {
+  const webServer = fakeWebServer()
+  registerRoutes(peerHost(webServer), makeStore())
+  assert.equal(webServer.options.size, 10)
+  for (const [path, route] of webServer.options) {
+    assert.equal(route.kind, 'exact', path)
+    assert.equal(route.auth, 'required', path)
+  }
+})
+
 test('routes reject a missing marker, a wrong method, and malformed JSON', async () => {
   const webServer = fakeWebServer()
-  registerRoutes({ webServer, connection: fakeConnection() }, makeStore())
+  registerRoutes(peerHost(webServer), makeStore())
 
   const unmarked = await call(webServer, 'state', { guard: false })
   assert.equal(unmarked.response.status, 403)
@@ -126,7 +150,7 @@ test('routes reject a missing marker, a wrong method, and malformed JSON', async
 test('an oversized body is drained and answered with 413', async () => {
   const webServer = fakeWebServer()
   let reached = false
-  registerRoutes({ webServer, connection: fakeConnection() }, makeStore({
+  registerRoutes(peerHost(webServer), makeStore({
     async create() {
       reached = true
       return {}
@@ -144,7 +168,7 @@ test('an oversized body is drained and answered with 413', async () => {
 
 test('store errors keep their code in the envelope', async () => {
   const webServer = fakeWebServer()
-  registerRoutes({ webServer, connection: fakeConnection() }, makeStore({
+  registerRoutes(peerHost(webServer), makeStore({
     async create() {
       throw new ManagedWorkspaceError('exists', 'workspace folder already exists: D:\\base\\demo')
     },
@@ -156,7 +180,36 @@ test('store errors keep their code in the envelope', async () => {
   assert.match(result.payload.error.message, /already exists/)
 })
 
-test('the connection fence answers before the marker header and never reaches the store', async () => {
+test('a host without an owner Peer is refused before the store is reached', async () => {
+  for (const peer of [undefined, { principal: { kind: 'api' } }]) {
+    const webServer = fakeWebServer()
+    let reached = false
+    registerRoutes(peerHost(webServer), makeStore({
+      async state() {
+        reached = true
+        return STATE
+      },
+    }))
+    const result = await call(webServer, 'state', { guard: false, peer: peer === undefined ? null : peer })
+    assert.equal(result.response.status, 403)
+    assert.equal(result.payload.error.code, 'forbidden')
+    assert.equal(reached, false)
+  }
+})
+
+test('routes still mount when no connection service is reachable', async () => {
+  // DSH 0.3 authenticates in the WebServer, so the panel must keep working even
+  // when Connection is renamed or absent; admission then fails closed.
+  const webServer = fakeWebServer()
+  assert.doesNotThrow(() => registerRoutes({ webServer }, makeStore()))
+  assert.equal(webServer.routes.size, 10)
+  const denied = await call(webServer, 'state', { peer: null })
+  assert.equal(denied.response.status, 403)
+  const allowed = await call(webServer, 'state')
+  assert.equal(allowed.response.status, 200)
+})
+
+test('the legacy connection fence answers before the marker header and never reaches the store', async () => {
   const webServer = fakeWebServer()
   const connection = fakeConnection(401)
   let reached = false
@@ -168,7 +221,7 @@ test('the connection fence answers before the marker header and never reaches th
   }))
   // No marker header: a hostile same-origin page would attach it, which is
   // exactly why the fence has to run first.
-  const unauthorized = await call(webServer, 'state', { guard: false })
+  const unauthorized = await call(webServer, 'state', { guard: false, peer: undefined })
   assert.equal(unauthorized.response.status, 401)
   assert.equal(unauthorized.payload.error.code, 'unauthorized')
   assert.equal(reached, false)
@@ -176,7 +229,7 @@ test('the connection fence answers before the marker header and never reaches th
   const forbidden = await (async () => {
     const server = fakeWebServer()
     registerRoutes({ webServer: server, connection: fakeConnection(403) }, makeStore())
-    return call(server, 'state')
+    return call(server, 'state', { peer: null })
   })()
   assert.equal(forbidden.response.status, 403)
   assert.equal(forbidden.payload.error.code, 'forbidden')
@@ -184,13 +237,23 @@ test('the connection fence answers before the marker header and never reaches th
   assert.ok(connection.calls >= 1)
 })
 
-test('routes refuse to mount when the connection fence is unavailable', () => {
-  assert.throws(
-    () => registerRoutes({ webServer: fakeWebServer() }, makeStore()),
-    (error) => error.code === 'fence-unavailable' && /connection/.test(error.message),
-  )
-  assert.throws(
-    () => registerRoutes({ webServer: fakeWebServer(), connection: {} }, makeStore()),
-    (error) => error.code === 'fence-unavailable',
-  )
+test('a throwing legacy fence fails closed instead of opening the route', async () => {
+  const webServer = fakeWebServer()
+  let reached = false
+  registerRoutes({
+    webServer,
+    connection: {
+      requestRejection() {
+        throw new Error('fence exploded')
+      },
+    },
+  }, makeStore({
+    async state() {
+      reached = true
+      return STATE
+    },
+  }))
+  const result = await call(webServer, 'state', { peer: null })
+  assert.equal(result.response.status, 403)
+  assert.equal(reached, false)
 })

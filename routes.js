@@ -11,22 +11,57 @@ const GUARD_HEADER = 'x-dsh-managed-workspaces'
 const MAX_BODY_BYTES = 64 * 1024
 
 /**
- * The composition's connection service owns the Host/Origin fence and browser
- * authentication. Routes mounted with `webServer.register` sit outside the
- * `/api` gateway, so they receive neither: the marker header below stops plain
- * cross-site form posts but not DNS rebinding, where a hostile page becomes
- * same-origin by rewriting its own host name. Every request therefore asks the
- * connection service for a rejection before it can reach the store.
+ * Route admission has two generations, and the plugin supports both.
+ *
+ * Before DSH 0.3 the WebServer dispatched every registered route without
+ * authenticating it, so the plugin asked `connection.requestRejection` for the
+ * Host/Origin fence and the browser credential itself. DSH 0.3 moved admission
+ * into the WebServer: a route declares `auth`, the request is authenticated
+ * before dispatch, and the handler receives the admitted `Peer`. Connection
+ * dropped `requestRejection` in the same change, which is why the panel went
+ * blank on the newer host — the plugin refused to mount any route.
+ *
+ * `admissionOf` therefore returns a per-request guard that works on both:
+ *  - legacy host: ask Connection, which returns 401/403 or undefined;
+ *  - current host: require the owner Peer the WebServer already admitted.
+ * Anything else fails closed, so no route ever runs unfenced.
  */
 function connectionOf(ctx) {
-  const connection = ctx?.connection
-  if (connection === undefined || typeof connection.requestRejection !== 'function') {
-    throw new ManagedWorkspaceError(
-      'fence-unavailable',
-      'the connection service is required to serve managed workspace routes safely',
-    )
+  try {
+    if (typeof ctx?.get === 'function') {
+      const service = ctx.get('connection')
+      if (service !== undefined && service !== null) return service
+    }
+  } catch {
+    // An unavailable optional service is not an error here.
   }
-  return connection
+  try {
+    return ctx?.connection ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+function admissionOf(ctx) {
+  const connection = connectionOf(ctx)
+  if (connection !== undefined && typeof connection.requestRejection === 'function') {
+    return {
+      generation: 'legacy',
+      // Fail closed when the fence itself throws: an exception here must not
+      // become an open route.
+      guard: (request) => {
+        try {
+          return connection.requestRejection(request)
+        } catch {
+          return 403
+        }
+      },
+    }
+  }
+  return {
+    generation: 'peer',
+    guard: (_request, peer) => (peer?.principal?.kind === 'owner' ? undefined : 403),
+  }
 }
 
 function errorPayload(error) {
@@ -71,16 +106,16 @@ async function readBody(request) {
   return Buffer.concat(chunks).toString('utf8')
 }
 
-function routeHandler(operation, connection) {
-  return async (request, response) => {
+function routeHandler(operation, admission) {
+  return async (request, response, peer) => {
     try {
-      const rejection = connection.requestRejection(request)
+      const rejection = admission.guard(request, peer)
       if (rejection !== undefined) {
         sendJson(response, rejection, {
           ok: false,
           error: {
-            code: rejection === 401 ? 'unauthorized' : 'forbidden',
-            message: 'request rejected by the connection fence',
+            code: rejection === 401 ? 'unauthorized' : rejection === 503 ? 'unavailable' : 'forbidden',
+            message: 'request was not admitted by the harness',
           },
         })
         return
@@ -124,20 +159,23 @@ function routeHandler(operation, connection) {
 
 /**
  * Register every plugin route on the hosting web server.
- * @param {object} ctx - plugin context providing `webServer` and `connection`.
+ * @param {object} ctx - plugin context providing `webServer`, and `connection` on hosts that still fence routes explicitly.
  * @param {import('./store.js').ManagedWorkspaceStore} store - state owner.
  * @returns {() => void} disposer removing every route.
  */
 export function registerRoutes(ctx, store) {
   const webServer = ctx.webServer
-  const connection = connectionOf(ctx)
+  const admission = admissionOf(ctx)
   const disposers = []
   const route = (name, operation) => {
     disposers.push(
       webServer.register({
         kind: 'exact',
         path: API_PREFIX + name,
-        handler: routeHandler(operation, connection),
+        // Current hosts authenticate before dispatch; older hosts ignore the
+        // field and are guarded per request by the legacy fence instead.
+        auth: 'required',
+        handler: routeHandler(operation, admission),
       }),
     )
   }

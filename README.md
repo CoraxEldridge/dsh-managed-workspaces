@@ -43,6 +43,10 @@ plugin_manager({ action: "install_bundle", target: "D:\\path\\to\\dsh-managed-wo
 
 安装后点侧边栏「+」（添加工作区）即可看到托管工作区入口；若结果显示 `restart-required`，重启 DSH 后生效。更新已安装版本时重复对应的安装命令即可。
 
+### 与 DSH 版本的兼容
+
+插件同时适配 DSH 路由准入的两代实现：0.3 之前由 `connection.requestRejection` 显式围栏，0.3 起改为 WebServer 在分发前完成认证并把 `Peer` 交给 handler（`auth: 'required'`）。两代都会在入口拒绝非 owner 的请求，且不再因为某个服务消失而整段路由挂不上——2026-11 的 DSH 升级曾把面板打成空白，就是旧代码在注册阶段直接抛错导致的。
+
 ## 接入已有工作区
 
 侧边栏里已经存在的工作区可以「接入」插件，纳入同一套管理（这样就能给它们关联额外文件夹），而且**不移动、不改名、不新建任何文件**：
